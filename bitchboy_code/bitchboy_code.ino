@@ -4,7 +4,44 @@
 #include <MIDI.h>
 #include "Adafruit_seesaw.h"
 #include <seesaw_neopixel.h>
+#include "tusb.h"
 
+// Custom USB Device Descriptor
+tusb_desc_device_t custom_desc_device = {
+    .bLength            = sizeof(tusb_desc_device_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE,
+    .bcdUSB             = 0x0200,
+    .bDeviceClass       = TUSB_CLASS_MISC,
+    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor           = 0xCafe,
+    .idProduct          = 0x4002,
+    .bcdDevice          = 0x0100,
+    .iManufacturer      = 0x01,
+    .iProduct           = 0x02,
+    .iSerialNumber      = 0x03,
+    .bNumConfigurations = 0x01
+};
+
+// Custom String Descriptors
+const char* custom_string_desc_arr[] = {
+    (const char[]){0x09, 0x04},  // 0: Supported language is English
+    "BLOCK SYSTEM",                // 1: Manufacturer
+    "BitchBoy",                  // 2: Product name
+    "123456",                    // 3: Serial number
+};
+
+// Override the default descriptors
+extern "C" {
+const tusb_desc_device_t* tud_desc_get_custom_device(void) {
+    return &custom_desc_device;
+}
+
+const char* const* tud_desc_get_custom_string(void) {
+    return custom_string_desc_arr;
+}
+}
 // User variables
 int MIDI_OUT_CH = 1;  // MIDI output channel
 
@@ -123,6 +160,10 @@ int encoderToNote[8] = { 120, 121, 122, 123, 124, 125, 126, 127 };
 
 
 void setup() {
+  // Set custom USB descriptors before anything else
+  TinyUSBDevice.setManufacturerDescriptor("BLOCK SYSTEM");
+  TinyUSBDevice.setProductDescriptor("BitchBoy");
+  TinyUSBDevice.setSerialDescriptor("123456");
   Serial.begin(115200);  // Initialize Serial for debugging
   Wire.begin();
   Wire.setClock(1000000); // Set I2C clock speed to 400 kHz if supported
