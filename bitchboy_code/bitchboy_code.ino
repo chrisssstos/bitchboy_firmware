@@ -366,7 +366,7 @@ void handleRotaryEncoders() {
   for (int e = 0; e < 4; e++) {
     int32_t new_enc_position = ss2.getEncoderPosition(e);
     int32_t delta = new_enc_position - enc_positions_2[e];  // Calculate the delta
-    delta = -delta;  // Reverse the direction by inverting delta
+    // delta = -delta;  // Reverse the direction by inverting delta
     if (delta != 0) {
       enc_positions_2[e] = new_enc_position;
       sendRelativeCC(e + 4, delta);  // Offset for second board
