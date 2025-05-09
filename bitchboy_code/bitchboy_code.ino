@@ -76,7 +76,7 @@ Adafruit_TCA8418 tca8418;
 #define BASE_CC_NUMBER 20  // Starting CC number for the first potentiometer
 
 // New brightness control
-uint8_t led_brightness = 87; // Default brightness value (0-255)
+uint8_t led_brightness = 65; // Default brightness value (0-255)
 bool button83Pressed = false;
 bool button44Pressed = false;
 
@@ -556,7 +556,7 @@ uint32_t velocityToColor(int velocity) {
   // Note: The table values are in hex, we'll convert them to decimal RGB components (0-255)
   
   switch (velocity) {
-    case 0: return keypadPixels.Color(0x03, 0x03, 0x03);    // #BBOY GRAY
+    case 0: return keypadPixels.Color(0x04, 0x04, 0x04);    // #BBOY GRAY
     case 1: return keypadPixels.Color(0x1E, 0x1E, 0x1E);    // #1E1E1E
     case 2: return keypadPixels.Color(0x7F, 0x7F, 0x7F);    // #7F7F7F
     case 3: return keypadPixels.Color(0xFF, 0xFF, 0xFF);    // #FFFFFF
@@ -588,7 +588,7 @@ uint32_t velocityToColor(int velocity) {
     case 29: return keypadPixels.Color(0x00, 0xFF, 0x55);   // #00FF55
     case 30: return keypadPixels.Color(0x00, 0x59, 0x1D);   // #00591D
     case 31: return keypadPixels.Color(0x00, 0x1F, 0x12);   // #001F12
-    case 32: return keypadPixels.Color(0x30, 0x0C, 0x00);   // #BBOY ORANGE
+    case 32: return keypadPixels.Color(0xD6, 0x35, 0x00);   // #BBOY ORANGE
     case 33: return keypadPixels.Color(0x00, 0xFF, 0x99);   // #00FF99
     case 34: return keypadPixels.Color(0x00, 0x59, 0x35);   // #005935
     case 35: return keypadPixels.Color(0x00, 0x19, 0x12);   // #001912
