@@ -422,6 +422,7 @@ void updatePotValues() {
 
     // Constrain filteredValue to stay within 0 to 1023
     filteredValue = constrain(filteredValue, 0, 1023);
+    
   
     // Only update and send MIDI if the value has changed significantly
     if (abs(filteredValue - potValues[i]) > 4) {
@@ -431,6 +432,9 @@ void updatePotValues() {
       int ccValue = map(filteredValue, 510, 980, 0, 127);
       // int ccValue = map(rawValue, 460, 1023, 0, 127);
       ccValue = constrain(ccValue, 0, 127);  // Hard limit to 0-127
+      if (ccValue <= 5) {
+      ccValue = 0;
+    }
       
       // Send MIDI CC message with a unique CC number for each potentiometer
       MIDI.sendControlChange(BASE_CC_NUMBER + i, ccValue, MIDI_OUT_CH);
