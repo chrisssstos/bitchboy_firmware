@@ -435,6 +435,9 @@ void updatePotValues() {
       if (ccValue <= 5) {
       ccValue = 0;
     }
+    // if (ccValue <= 10 && i ==6) {
+    //   ccValue = 0;
+    // }
       
       // Send MIDI CC message with a unique CC number for each potentiometer
       MIDI.sendControlChange(BASE_CC_NUMBER + i, ccValue, MIDI_OUT_CH);
