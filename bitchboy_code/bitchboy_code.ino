@@ -80,15 +80,10 @@ uint8_t led_brightness = 65; // Default brightness value (0-255)
 bool button83Pressed = false;
 bool button44Pressed = false;
 
-int potValues[NUM_POTS];
-int lastSentCCValues[NUM_POTS];  // Track last sent CC values to prevent redundant sends 
+int potValues[NUM_POTS]; 
 
 Adafruit_seesaw ss1 = Adafruit_seesaw(&Wire);  // First board
 Adafruit_seesaw ss2 = Adafruit_seesaw(&Wire);  // Second board
-
-// Connection status flags
-bool ss1_connected = false;
-bool ss2_connected = false;
 
 int32_t enc_positions_1[4] = { 0, 0, 0, 0 };  // Encoder positions for board 1
 int32_t enc_positions_2[4] = { 0, 0, 0, 0 };  // Encoder positions for board 2
@@ -196,78 +191,49 @@ void setup() {
   for (int i = 0; i < VELOCITY_BUFFER_SIZE; i++) {
     velocityBuffer[i] = 0;
   }
-  
-  // Initialize CC values
-  for (int i = 0; i < NUM_POTS; i++) {
-    lastSentCCValues[i] = -1;  // Initialize to -1 so first read always sends
-  }
 
   keypadPixels.clear();
   keypadPixels.show();
   
-  // Initialize the first board - DO NOT HALT IF IT FAILS
-  if (ss1.begin(SEESAW_ADDR_1)) {
-    ss1_connected = true;
-    
-    // Set the pin modes for the encoder switches on the first board
-    ss1.pinMode(SS_ENC0_SWITCH, INPUT_PULLUP);
-    ss1.pinMode(SS_ENC1_SWITCH, INPUT_PULLUP);
-    ss1.pinMode(SS_ENC2_SWITCH, INPUT_PULLUP);
-    ss1.pinMode(SS_ENC3_SWITCH, INPUT_PULLUP);
-
-    // Enable interrupts for the encoders on board 1
-    ss1.setGPIOInterrupts(1UL << SS_ENC0_SWITCH | 1UL << SS_ENC1_SWITCH | 1UL << SS_ENC2_SWITCH | 1UL << SS_ENC3_SWITCH, 1);
-    
-    for (int e = 0; e < 4; e++) {
-      ss1.enableEncoderInterrupt(e);  // For the first board
-    }
-    
-    Serial.println("Seesaw board 1 initialized.");
-  } else {
-    ss1_connected = false;
-    Serial.println("WARNING: Couldn't find Seesaw board 1 - continuing without it");
+  // Initialize the first board
+  if (!ss1.begin(SEESAW_ADDR_1)) {
+    Serial.println("Couldn't find Seesaw board 1");
+    while (1) delay(10);
   }
 
-  // Initialize the second board - DO NOT HALT IF IT FAILS
-  if (ss2.begin(SEESAW_ADDR_2)) {
-    ss2_connected = true;
-    
-    // Set the pin modes for the encoder switches on the second board
-    ss2.pinMode(SS_ENC0_SWITCH, INPUT_PULLUP);
-    ss2.pinMode(SS_ENC1_SWITCH, INPUT_PULLUP);
-    ss2.pinMode(SS_ENC2_SWITCH, INPUT_PULLUP);
-    ss2.pinMode(SS_ENC3_SWITCH, INPUT_PULLUP);
-
-    // Enable interrupts for the encoders on board 2
-    ss2.setGPIOInterrupts(1UL << SS_ENC0_SWITCH | 1UL << SS_ENC1_SWITCH | 1UL << SS_ENC2_SWITCH | 1UL << SS_ENC3_SWITCH, 1);
-    
-    for (int e = 0; e < 4; e++) {
-      ss2.enableEncoderInterrupt(e);  // For the second board
-    }
-    
-    Serial.println("Seesaw board 2 initialized.");
-  } else {
-    ss2_connected = false;
-    Serial.println("WARNING: Couldn't find Seesaw board 2 - continuing without it");
+  // Initialize the second board
+  if (!ss2.begin(SEESAW_ADDR_2)) {
+    Serial.println("Couldn't find Seesaw board 2");
+    while (1) delay(10);
   }
 
-  // Report which boards are connected
-  if (ss1_connected && ss2_connected) {
-    Serial.println("Both encoder boards connected and initialized.");
-  } else if (ss1_connected && !ss2_connected) {
-    Serial.println("Only encoder board 1 is connected.");
-  } else if (!ss1_connected && ss2_connected) {
-    Serial.println("Only encoder board 2 is connected.");
-  } else {
-    Serial.println("WARNING: No encoder boards found - encoders disabled.");
+  // Set the pin modes for the encoder switches on the first board
+  ss1.pinMode(SS_ENC0_SWITCH, INPUT_PULLUP);
+  ss1.pinMode(SS_ENC1_SWITCH, INPUT_PULLUP);
+  ss1.pinMode(SS_ENC2_SWITCH, INPUT_PULLUP);
+  ss1.pinMode(SS_ENC3_SWITCH, INPUT_PULLUP);
+
+  // Set the pin modes for the encoder switches on the second board
+  ss2.pinMode(SS_ENC0_SWITCH, INPUT_PULLUP);
+  ss2.pinMode(SS_ENC1_SWITCH, INPUT_PULLUP);
+  ss2.pinMode(SS_ENC2_SWITCH, INPUT_PULLUP);
+  ss2.pinMode(SS_ENC3_SWITCH, INPUT_PULLUP);
+
+  // Enable interrupts for the encoders on both boards
+  ss1.setGPIOInterrupts(1UL << SS_ENC0_SWITCH | 1UL << SS_ENC1_SWITCH | 1UL << SS_ENC2_SWITCH | 1UL << SS_ENC3_SWITCH, 1);
+  ss2.setGPIOInterrupts(1UL << SS_ENC0_SWITCH | 1UL << SS_ENC1_SWITCH | 1UL << SS_ENC2_SWITCH | 1UL << SS_ENC3_SWITCH, 1);
+
+  for (int e = 0; e < 4; e++) {
+    ss1.enableEncoderInterrupt(e);  // For the first board
+    ss2.enableEncoderInterrupt(e);  // For the second board
   }
+
+  Serial.println("Both encoder boards initialized.");
 
   pinMode(MUX_S0, OUTPUT);
   pinMode(MUX_S1, OUTPUT);
   pinMode(MUX_S2, OUTPUT);
   pinMode(MUX_S3, OUTPUT);
-  
-  Serial.println("Setup complete!");
 }
 
 void loop() {
@@ -338,10 +304,6 @@ void handleKeypad() {
 void checkEncoderSwitches() {
   // Loop through each board
   for (int board = 0; board < 2; board++) {
-    // Skip if the board is not connected
-    if (board == 0 && !ss1_connected) continue;
-    if (board == 1 && !ss2_connected) continue;
-    
     // Loop through each encoder switch
     for (int enc = 0; enc < 4; enc++) {
       bool pressed = !seesawBoards[board]->digitalRead(encoderSwitchPins[enc]);
@@ -375,53 +337,47 @@ void checkEncoderSwitches() {
 }
 
 void handleRotaryEncoders() {
-  // Handle board 1 encoders only if connected
-  if (ss1_connected) {
-    for (int e = 0; e < 4; e++) {
-      int32_t new_enc_position = ss1.getEncoderPosition(e);
-      int32_t delta = new_enc_position - enc_positions_1[e];  // Calculate the delta
+  for (int e = 0; e < 4; e++) {
+    int32_t new_enc_position = ss1.getEncoderPosition(e);
+    int32_t delta = new_enc_position - enc_positions_1[e];  // Calculate the delta
+    
+
+    if (delta != 0) {
+      enc_positions_1[e] = new_enc_position;
       
-
-      if (delta != 0) {
-        enc_positions_1[e] = new_enc_position;
-        
-        // Special case for encoder 3 (index 3) on board 1 for brightness control
-        if (e == 3 && button83Pressed && button44Pressed) {
-          // Adjust brightness instead of sending MIDI CC
-          adjustBrightness(delta);
-        } else {
-          sendRelativeCC(e, delta);
-        }
-        
-        Serial.print("Board 1 Encoder #");
-        Serial.print(e);
-        Serial.print(" -> Delta: ");
-        Serial.println(delta);
+      // Special case for encoder 3 (index 3) on board 1 for brightness control
+      if (e == 3 && button83Pressed && button44Pressed) {
+        // Adjust brightness instead of sending MIDI CC
+        adjustBrightness(delta);
+      } else {
+        sendRelativeCC(e, delta);
       }
-
-      // Acknowledge the interrupt by reading the pin
-      ss1.digitalRead(SS_ENC0_SWITCH + e); // Acknowledge the interrupt by reading each pin
+      
+      Serial.print("Board 1 Encoder #");
+      Serial.print(e);
+      Serial.print(" -> Delta: ");
+      Serial.println(delta);
     }
+
+    // Acknowledge the interrupt by reading the pin
+    ss1.digitalRead(SS_ENC0_SWITCH + e); // Acknowledge the interrupt by reading each pin
   }
 
-  // Handle board 2 encoders only if connected
-  if (ss2_connected) {
-    for (int e = 0; e < 4; e++) {
-      int32_t new_enc_position = ss2.getEncoderPosition(e);
-      int32_t delta = new_enc_position - enc_positions_2[e];  // Calculate the delta
-      // delta = -delta;  // Reverse the direction by inverting delta
-      if (delta != 0) {
-        enc_positions_2[e] = new_enc_position;
-        sendRelativeCC(e + 4, delta);  // Offset for second board
-        Serial.print("Board 2 Encoder #");
-        Serial.print(e);
-        Serial.print(" -> Delta: ");
-        Serial.println(delta);
-      }
-
-      // Acknowledge the interrupt by reading the pin
-      ss2.digitalRead(SS_ENC0_SWITCH + e); // Acknowledge the interrupt by reading each pin
+  for (int e = 0; e < 4; e++) {
+    int32_t new_enc_position = ss2.getEncoderPosition(e);
+    int32_t delta = new_enc_position - enc_positions_2[e];  // Calculate the delta
+    // delta = -delta;  // Reverse the direction by inverting delta
+    if (delta != 0) {
+      enc_positions_2[e] = new_enc_position;
+      sendRelativeCC(e + 4, delta);  // Offset for second board
+      Serial.print("Board 2 Encoder #");
+      Serial.print(e);
+      Serial.print(" -> Delta: ");
+      Serial.println(delta);
     }
+
+    // Acknowledge the interrupt by reading the pin
+    ss2.digitalRead(SS_ENC0_SWITCH + e); // Acknowledge the interrupt by reading each pin
   }
 }
 
@@ -458,45 +414,45 @@ void adjustBrightness(int32_t delta) {
 }
 
 void updatePotValues() {
-  unsigned long currentTime = millis();
-  
-  // Read all pots every loop for maximum smoothness
   for (int i = 0; i < NUM_POTS; i++) {
     int rawValue = readMuxChannel(i);
 
-    // Apply a low-pass filter with stronger smoothing to reduce noise
-    int filteredValue = potValues[i] * 0.85 + rawValue * 0.15;  // Stronger filtering
+    // Apply a low-pass filter
+    int filteredValue = potValues[i] * (1 - SMOOTHING_FACTOR) + rawValue * SMOOTHING_FACTOR;
 
     // Constrain filteredValue to stay within 0 to 1023
     filteredValue = constrain(filteredValue, 0, 1023);
     
-    // Only update if the analog value has changed significantly (noise floor)
-    if (abs(filteredValue - potValues[i]) > 8) {  // Higher threshold to filter noise
+  
+    // Only update and send MIDI if the value has changed significantly
+    if (abs(filteredValue - potValues[i]) > 4) {
       potValues[i] = filteredValue;
       
-      // Map filteredValue to MIDI CC range (0-127)
+      // Map filteredValue to MIDI CC range (0-127) and hard limit it
       int ccValue = map(filteredValue, 510, 980, 0, 127);
-      ccValue = constrain(ccValue, 0, 127);
-      
-      // Apply deadzone at extremes to prevent flickering
+      // int ccValue = map(rawValue, 460, 1023, 0, 127);
+      ccValue = constrain(ccValue, 0, 127);  // Hard limit to 0-127
       if (ccValue <= 5) {
-        ccValue = 0;
-      } else if (ccValue >= 122) {
-        ccValue = 127;
-      }
+      ccValue = 0;
+    }
+    // if (ccValue <= 10 && i ==6) {
+    //   ccValue = 0;
+    // }
       
-      // Only send if CC value actually changed
-      if (ccValue != lastSentCCValues[i]) {
-        lastSentCCValues[i] = ccValue;
-        
-        // Send MIDI CC message
-        MIDI.sendControlChange(BASE_CC_NUMBER + i, ccValue, MIDI_OUT_CH);
-        
-        // Small yield every few messages to prevent USB buffer overflow
-        if (i % 3 == 0) {
-          yield();
-        }
-      }
+      // Send MIDI CC message with a unique CC number for each potentiometer
+      MIDI.sendControlChange(BASE_CC_NUMBER + i, ccValue, MIDI_OUT_CH);
+
+      // Debugging output to Serial Monitor
+      Serial.print("Potentiometer ");
+      Serial.print(i);
+      Serial.print(" RAW value: ");
+      Serial.print(rawValue);
+      Serial.print(" FILT value: ");
+      Serial.print(filteredValue);
+      Serial.print(" mapped to CC: ");
+      Serial.print(BASE_CC_NUMBER + i);
+      Serial.print(" with value: ");
+      Serial.println(ccValue);
     }
   }
 }
