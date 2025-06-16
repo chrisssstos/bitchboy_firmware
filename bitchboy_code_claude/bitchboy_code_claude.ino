@@ -479,11 +479,15 @@ void updatePotValues() {
       ccValue = constrain(ccValue, 0, 127);
       
       // Apply deadzone at extremes to prevent flickering
-      if (ccValue <= 5) {
+      if (ccValue <= 10) {
         ccValue = 0;
       } else if (ccValue >= 122) {
         ccValue = 127;
       }
+      // if (ccValue <= 10 && i ==6) {
+    //   ccValue = 0;
+    // }
+      
       
       // Only send if CC value actually changed
       if (ccValue != lastSentCCValues[i]) {
