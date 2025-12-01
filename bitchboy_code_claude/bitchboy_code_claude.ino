@@ -1,9 +1,8 @@
 #include <Adafruit_TCA8418.h>
 #include <Adafruit_TinyUSB.h>
 #include <Adafruit_NeoPixel.h>
+#include <CD74HC4067.h>
 #include <MIDI.h>
-#include "Adafruit_seesaw.h"
-#include <seesaw_neopixel.h>
 #include "tusb.h"
 
 // Custom USB Device Descriptor
@@ -56,46 +55,30 @@ MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usb_midi, MIDI);
 Adafruit_TCA8418 tca8418;
 #define TCA8418_ADDR TCA8418_DEFAULT_ADDR
 
-// Define Seesaw addresses for two boards
-#define SEESAW_ADDR_1 0x49  // Address for the first board
-#define SEESAW_ADDR_2 0x4A  // Address for the second board (after cutting A0)
+// New GPIO mappings from second file
+CD74HC4067 mux(22, 21, 19, 20);
 
-// Define encoder switch pins (these are the same for both boards)
-#define SS_ENC0_SWITCH 12
-#define SS_ENC1_SWITCH 14
-#define SS_ENC2_SWITCH 17
-#define SS_ENC3_SWITCH 9
+#define SLIDERS_PIN A0
+#define POTS_PIN A1
+#define NUM_SLIDERS 12
+#define NUM_POTS 8
 
-#define MUX_S0 0
-#define MUX_S1 1
-#define MUX_S2 2
-#define MUX_S3 3
-#define MUX_ANALOG_PIN 26  // GP26 (ADC0)
-#define NUM_POTS 12
-#define SMOOTHING_FACTOR 0.2
-#define BASE_CC_NUMBER 20  // Starting CC number for the first potentiometer
+const int sliderMap[NUM_SLIDERS] = {12, 11, 10, 9, 8, 7, 6, 5, 1, 2, 3, 4};
+const int potMap[NUM_POTS] = {2, 4, 6, 8, 1, 3, 5, 7};
 
-// New brightness control
-uint8_t led_brightness = 65; // Default brightness value (0-255)
-bool button83Pressed = false;
-bool button44Pressed = false;
+// Calibrated values
+int sliderMinValues[NUM_SLIDERS] = {375, 369, 396, 374, 385, 366, 380, 358, 377, 375, 362, 375};
+int sliderMaxValues[NUM_SLIDERS] = {4095, 4095, 4094, 4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
 
-int potValues[NUM_POTS]; 
+int potMinValues[NUM_POTS] = {355, 352, 377, 379, 369, 390, 383, 384};
+int potMaxValues[NUM_POTS] = {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
 
-Adafruit_seesaw ss1 = Adafruit_seesaw(&Wire);  // First board
-Adafruit_seesaw ss2 = Adafruit_seesaw(&Wire);  // Second board
+int previousSliderValues[NUM_SLIDERS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+int previousPotValues[NUM_POTS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
-// Connection status flags
-bool ss1_connected = false;
-bool ss2_connected = false;
-
-int32_t enc_positions_1[4] = { 0, 0, 0, 0 };  // Encoder positions for board 1
-int32_t enc_positions_2[4] = { 0, 0, 0, 0 };  // Encoder positions for board 2
-
-// NeoPixel setup for the encoder
-#define SS_NEO_PIN 18
-seesaw_NeoPixel encoderPixels = seesaw_NeoPixel(4, SS_NEO_PIN, NEO_GRB + NEO_KHZ800);  // Renamed for clarity
-bool previousState[8] = {false, false, false, false, false, false, false, false};
+// Smoothed values for noise reduction
+float smoothedSliderValues[NUM_SLIDERS] = {0,0,0,0,0,0,0,0,0,0,0,0};
+float smoothedPotValues[NUM_POTS] = {0,0,0,0,0,0,0,0};
 
 // Keypad mapping (your keypad's physical layout)
 char keys[ROWS][COLS] = {
@@ -124,14 +107,14 @@ int padToNote[NUMPIXELS] = {
 
 
 int padToPixel[NUMPIXELS] = {
-  0, 1, 2, 3, 4, 5, 6, 7,          // Row 1
-  15, 14, 13, 12, 11, 10, 9, 8,    // Row 2
-  16, 17, 18, 19, 20, 21, 22, 23,  // Row 3
-  31, 30, 29, 28, 27, 26, 25, 24,  // Row 4
-  32, 33, 34, 35, 36, 37, 38, 39,  // Row 5
-  40, 41, 42, -1, -1, -1, -1, -1,  // Row 6
-  45, 44, 43, -1, -1, -1, -1, -1,  // Row 7
-  46, 47, 48, -1, -1, -1, -1, -1   // Row 8
+  0, 1, 2, 3, 4, 5, 6, 7,
+  8, 9, 10, 11, 12, 13, 14, 15,
+  16, 17, 18, 19, 20, 21, 22, 23,
+  24, 25, 26, 27, 28, 29, 30, 31,
+  32, 33, 34, 35, 36, 37, 38, 39,
+  40, 41, 42, -1, -1, -1, -1, -1,
+  43, 44, 45, -1, -1, -1, -1, -1,
+  46, 47, 48, -1, -1, -1, -1, -1
 };
 int noteToPad[128];           // MIDI notes range from 0 to 127
 int velocities[128];          // For flashing LEDs or state tracking
@@ -154,14 +137,6 @@ unsigned long previousMillis = 0;
 const long interval = 500;
 bool flashState = false;
 
-// Arrays for the switch pin numbers on both boards
-const int encoderSwitchPins[] = { SS_ENC0_SWITCH, SS_ENC1_SWITCH, SS_ENC2_SWITCH, SS_ENC3_SWITCH };
-
-// Array of references to the Seesaw boards
-Adafruit_seesaw* seesawBoards[] = { &ss1, &ss2 };
-// Define the MIDI note range for encoder presses (e.g., starting from note 120)
-int encoderToNote[8] = { 120, 121, 122, 123, 124, 125, 126, 127 };
-
 
 void setup() {
   // Set custom USB descriptors before anything else
@@ -170,10 +145,10 @@ void setup() {
   TinyUSBDevice.setSerialDescriptor("123456");
   Serial.begin(115200);  // Initialize Serial for debugging
   Wire.begin();
-  Wire.setClock(1000000); // Set I2C clock speed to 400 kHz if supported
+  Wire.setClock(1000000); // Set I2C clock speed to 1MHz
   MIDI.begin(MIDI_OUT_CH);
   keypadPixels.begin();
-  keypadPixels.setBrightness(led_brightness); // Initialize with default brightness
+  keypadPixels.setBrightness(50); // Default brightness
 
   if (!tca8418.begin(TCA8418_ADDR)) {
     Serial.println("TCA8418 keypad not found, check wiring & pullups!");
@@ -198,68 +173,8 @@ void setup() {
 
   keypadPixels.clear();
   keypadPixels.show();
-  
-  // Initialize the first board - DO NOT HALT IF IT FAILS
-  if (ss1.begin(SEESAW_ADDR_1)) {
-    ss1_connected = true;
-    
-    // Set the pin modes for the encoder switches on the first board
-    ss1.pinMode(SS_ENC0_SWITCH, INPUT_PULLUP);
-    ss1.pinMode(SS_ENC1_SWITCH, INPUT_PULLUP);
-    ss1.pinMode(SS_ENC2_SWITCH, INPUT_PULLUP);
-    ss1.pinMode(SS_ENC3_SWITCH, INPUT_PULLUP);
 
-    // Enable interrupts for the encoders on board 1
-    ss1.setGPIOInterrupts(1UL << SS_ENC0_SWITCH | 1UL << SS_ENC1_SWITCH | 1UL << SS_ENC2_SWITCH | 1UL << SS_ENC3_SWITCH, 1);
-    
-    for (int e = 0; e < 4; e++) {
-      ss1.enableEncoderInterrupt(e);  // For the first board
-    }
-    
-    Serial.println("Seesaw board 1 initialized.");
-  } else {
-    ss1_connected = false;
-    Serial.println("WARNING: Couldn't find Seesaw board 1 - continuing without it");
-  }
-
-  // Initialize the second board - DO NOT HALT IF IT FAILS
-  if (ss2.begin(SEESAW_ADDR_2)) {
-    ss2_connected = true;
-    
-    // Set the pin modes for the encoder switches on the second board
-    ss2.pinMode(SS_ENC0_SWITCH, INPUT_PULLUP);
-    ss2.pinMode(SS_ENC1_SWITCH, INPUT_PULLUP);
-    ss2.pinMode(SS_ENC2_SWITCH, INPUT_PULLUP);
-    ss2.pinMode(SS_ENC3_SWITCH, INPUT_PULLUP);
-
-    // Enable interrupts for the encoders on board 2
-    ss2.setGPIOInterrupts(1UL << SS_ENC0_SWITCH | 1UL << SS_ENC1_SWITCH | 1UL << SS_ENC2_SWITCH | 1UL << SS_ENC3_SWITCH, 1);
-    
-    for (int e = 0; e < 4; e++) {
-      ss2.enableEncoderInterrupt(e);  // For the second board
-    }
-    
-    Serial.println("Seesaw board 2 initialized.");
-  } else {
-    ss2_connected = false;
-    Serial.println("WARNING: Couldn't find Seesaw board 2 - continuing without it");
-  }
-
-  // Report which boards are connected
-  if (ss1_connected && ss2_connected) {
-    Serial.println("Both encoder boards connected and initialized.");
-  } else if (ss1_connected && !ss2_connected) {
-    Serial.println("Only encoder board 1 is connected.");
-  } else if (!ss1_connected && ss2_connected) {
-    Serial.println("Only encoder board 2 is connected.");
-  } else {
-    Serial.println("WARNING: No encoder boards found - encoders disabled.");
-  }
-
-  pinMode(MUX_S0, OUTPUT);
-  pinMode(MUX_S1, OUTPUT);
-  pinMode(MUX_S2, OUTPUT);
-  pinMode(MUX_S3, OUTPUT);
+  analogReadResolution(12);
   
   Serial.println("Setup complete!");
 }
@@ -271,10 +186,7 @@ void loop() {
   // Handle incoming MIDI messages
   readMIDI();
 
-  // Handle rotary encoder input
-  handleRotaryEncoders();
-  checkEncoderSwitches();
-
+  // Handle pots and sliders
   updatePotValues();
   
   unsigned long currentTime = millis();
@@ -308,207 +220,178 @@ void handleKeypad() {
     if (keyIndex >= 0 && keyIndex < NUMPIXELS) {
       int midiNote = padToNote[keyIndex];
       
-      // Check for special key combinations for brightness control
-      if (midiNote == 83) {
-        button83Pressed = pressed;
-        
-      Serial.print("83 PRESSED");
-  
-      } else if (midiNote == 44) {
-        button44Pressed = pressed;
-      }
-      
       if (pressed) {
         // Send Note On message with velocity 127
         MIDI.sendNoteOn(midiNote, 127, MIDI_OUT_CH);
+        
+        // Console log for button press
+        Serial.print("Button pressed -> Row:");
+        Serial.print(row);
+        Serial.print(" Col:");
+        Serial.print(col);
+        Serial.print(" KeyIndex:");
+        Serial.print(keyIndex);
+        Serial.print(" MIDI Note:");
+        Serial.print(midiNote);
+        Serial.println(" ON");
       } else {
         // Send Note Off message
         MIDI.sendNoteOff(midiNote, 0, MIDI_OUT_CH);
-      }
-    }
-  }
-}
-
-void checkEncoderSwitches() {
-  // Loop through each board
-  for (int board = 0; board < 2; board++) {
-    // Skip if the board is not connected
-    if (board == 0 && !ss1_connected) continue;
-    if (board == 1 && !ss2_connected) continue;
-    
-    // Loop through each encoder switch
-    for (int enc = 0; enc < 4; enc++) {
-      bool pressed = !seesawBoards[board]->digitalRead(encoderSwitchPins[enc]);
-      int encoderIndex = (board * 4) + enc;  // Unique index for the encoders across both boards
-      int midiNote = encoderToNote[encoderIndex];  // Get the corresponding MIDI note
-
-      // Check if the state has changed from the previous state
-      if (pressed != previousState[encoderIndex]) {
-        if (pressed) {
-          // Send Note On message with velocity 127 when pressed
-          MIDI.sendNoteOn(midiNote, 127, MIDI_OUT_CH);
-          Serial.print("ENC");
-          Serial.print(enc);
-          Serial.print(" on Board ");
-          Serial.print(board + 1);
-          Serial.println(" pressed! MIDI Note On sent.");
-        } else {
-          // Send Note Off message when released
-          MIDI.sendNoteOff(midiNote, 0, MIDI_OUT_CH);
-          Serial.print("ENC");
-          Serial.print(enc);
-          Serial.print(" on Board ");
-          Serial.print(board + 1);
-          Serial.println(" released! MIDI Note Off sent.");
-        }
-        // Update the previous state for this encoder
-        previousState[encoderIndex] = pressed;
-      }
-    }
-  }
-}
-
-void handleRotaryEncoders() {
-  // Handle board 1 encoders only if connected
-  if (ss1_connected) {
-    for (int e = 0; e < 4; e++) {
-      int32_t new_enc_position = ss1.getEncoderPosition(e);
-      int32_t delta = new_enc_position - enc_positions_1[e];  // Calculate the delta
-      
-
-      if (delta != 0) {
-        enc_positions_1[e] = new_enc_position;
         
-        // Special case for encoder 3 (index 3) on board 1 for brightness control
-        if (e == 3 && button83Pressed && button44Pressed) {
-          // Adjust brightness instead of sending MIDI CC
-          adjustBrightness(delta);
-        } else {
-          sendRelativeCC(e, delta);
-        }
-        
-        Serial.print("Board 1 Encoder #");
-        Serial.print(e);
-        Serial.print(" -> Delta: ");
-        Serial.println(delta);
+        // Console log for button release
+        Serial.print("Button released -> Row:");
+        Serial.print(row);
+        Serial.print(" Col:");
+        Serial.print(col);
+        Serial.print(" KeyIndex:");
+        Serial.print(keyIndex);
+        Serial.print(" MIDI Note:");
+        Serial.print(midiNote);
+        Serial.println(" OFF");
       }
-
-      // Acknowledge the interrupt by reading the pin
-      ss1.digitalRead(SS_ENC0_SWITCH + e); // Acknowledge the interrupt by reading each pin
-    }
-  }
-
-  // Handle board 2 encoders only if connected
-  if (ss2_connected) {
-    for (int e = 0; e < 4; e++) {
-      int32_t new_enc_position = ss2.getEncoderPosition(e);
-      int32_t delta = new_enc_position - enc_positions_2[e];  // Calculate the delta
-      // delta = -delta;  // Reverse the direction by inverting delta
-      if (delta != 0) {
-        enc_positions_2[e] = new_enc_position;
-        sendRelativeCC(e + 4, delta);  // Offset for second board
-        Serial.print("Board 2 Encoder #");
-        Serial.print(e);
-        Serial.print(" -> Delta: ");
-        Serial.println(delta);
-      }
-
-      // Acknowledge the interrupt by reading the pin
-      ss2.digitalRead(SS_ENC0_SWITCH + e); // Acknowledge the interrupt by reading each pin
     }
   }
 }
 
-// New function to adjust LED brightness
-void adjustBrightness(int32_t delta) {
-  // Save current brightness for comparison
-  uint8_t old_brightness = led_brightness;
-  
-  if (delta > 0) {
-    // Increase brightness, but cap at 255
-    led_brightness = min(255, led_brightness + 8);
-  } else if (delta < 0) {
-    // Decrease brightness, but don't go below 10 (not 1 to prevent blackout)
-    led_brightness = max(10, led_brightness - 8);
+int findChannelForSlider(int sliderNum) {
+  for (int i = 0; i < NUM_SLIDERS; i++) {
+    if (sliderMap[i] == sliderNum) return i;
   }
-  
-  // Only update if brightness actually changed
-  if (led_brightness != old_brightness) {
-    keypadPixels.setBrightness(led_brightness);
-    
-    // Force a complete redraw of all LEDs to maintain color accuracy
-    for (int i = 0; i < NUMPIXELS; i++) {
-      int midiNote = padToNote[i];
-      if (midiNote != -1) {
-        uint32_t color = velocityToColor(velocities[midiNote]);
-        keypadPixels.setPixelColor(padToPixel[i], color);
-      }
-    }
-    keypadPixels.show();
-    
-    Serial.print("LED Brightness adjusted to: ");
-    Serial.println(led_brightness);
+  return -1;
+}
+
+int findChannelForPot(int potNum) {
+  for (int i = 0; i < NUM_POTS; i++) {
+    if (potMap[i] == potNum) return i;
   }
+  return -1;
+}
+
+int readCalibratedSlider(int channel) {
+  mux.channel(channel);
+  delayMicroseconds(100);
+  
+  long sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += analogRead(SLIDERS_PIN);
+    delayMicroseconds(10);
+  }
+  int rawValue = sum / 10;
+  
+  if (smoothedSliderValues[channel] == 0) smoothedSliderValues[channel] = rawValue;
+  smoothedSliderValues[channel] = (smoothedSliderValues[channel] * 0.6) + (rawValue * 0.4);
+  
+  int calibratedValue = map((int)smoothedSliderValues[channel], sliderMinValues[channel], sliderMaxValues[channel], 0, 1270);
+  calibratedValue = (calibratedValue + 5) / 10;
+
+  // Snap to endpoints
+  if (calibratedValue <= 2) {
+    calibratedValue = 0;
+  } else if (calibratedValue >= 125) {
+    calibratedValue = 127;
+  }
+
+  // Uncomment below for verbose debugging of raw ADC values
+  // Serial.print("Slider CH");
+  // Serial.print(channel);
+  // Serial.print(" RAW:");
+  // Serial.print(rawValue);
+  // Serial.print(" SMOOTHED:");
+  // Serial.print((int)smoothedSliderValues[channel]);
+  // Serial.print(" CALIBRATED:");
+  // Serial.println(calibratedValue);
+  
+  return constrain(calibratedValue, 0, 127);
+}
+
+int readCalibratedPot(int channel) {
+  mux.channel(channel);
+  delayMicroseconds(100);
+  
+  long sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += analogRead(POTS_PIN);
+    delayMicroseconds(10);
+  }
+  int rawValue = sum / 10;
+  
+  if (smoothedPotValues[channel] == 0) smoothedPotValues[channel] = rawValue;
+  smoothedPotValues[channel] = (smoothedPotValues[channel] * 0.6) + (rawValue * 0.4);
+  
+  int calibratedValue = map((int)smoothedPotValues[channel], potMinValues[channel], potMaxValues[channel], 0, 1270);
+  calibratedValue = (calibratedValue + 5) / 10;
+
+  // Snap to endpoints
+  if (calibratedValue <= 2) {
+    calibratedValue = 0;
+  } else if (calibratedValue >= 125) {
+    calibratedValue = 127;
+  }
+
+  // Uncomment below for verbose debugging of raw ADC values
+  // Serial.print("Pot CH");
+  // Serial.print(channel);
+  // Serial.print(" RAW:");
+  // Serial.print(rawValue);
+  // Serial.print(" SMOOTHED:");
+  // Serial.print((int)smoothedPotValues[channel]);
+  // Serial.print(" CALIBRATED:");
+  // Serial.println(calibratedValue);
+  
+  return constrain(calibratedValue, 0, 127);
 }
 
 void updatePotValues() {
-  for (int i = 0; i < NUM_POTS; i++) {
-    int rawValue = readMuxChannel(i);
-
-    // Apply a low-pass filter
-    int filteredValue = potValues[i] * (1 - SMOOTHING_FACTOR) + rawValue * SMOOTHING_FACTOR;
-
-    // Constrain filteredValue to stay within 0 to 1023
-    filteredValue = constrain(filteredValue, 0, 1023);
+  static unsigned long lastUpdate = 0;
+  if (millis() - lastUpdate > 5) {
+    lastUpdate = millis();
     
-  
-    // Only update and send MIDI if the value has changed significantly
-    if (abs(filteredValue - potValues[i]) > 4) {
-      potValues[i] = filteredValue;
-      
-      // Map filteredValue to MIDI CC range (0-127) and hard limit it
-      int ccValue = map(filteredValue, 510, 980, 0, 127);
-      // int ccValue = map(rawValue, 460, 1023, 0, 127);
-      ccValue = constrain(ccValue, 0, 127);  // Hard limit to 0-127
-      if (ccValue <= 5) {
-      ccValue = 0;
+    // Handle sliders (CC 0-11)
+    for (int sliderNum = 1; sliderNum <= NUM_SLIDERS; sliderNum++) {
+      int channel = findChannelForSlider(sliderNum);
+      if (channel >= 0) {
+        int value = readCalibratedSlider(channel);
+        
+        if (abs(value - previousSliderValues[channel]) >= 3) {
+          MIDI.sendControlChange(sliderNum - 1, value, MIDI_OUT_CH);
+          previousSliderValues[channel] = value;
+          
+          // Console log for slider
+          Serial.print("Slider #");
+          Serial.print(sliderNum);
+          Serial.print(" (Channel ");
+          Serial.print(channel);
+          Serial.print(") -> CC");
+          Serial.print(sliderNum - 1);
+          Serial.print(" = ");
+          Serial.println(value);
+        }
+      }
     }
-    // if (ccValue <= 8 && i ==0) {
-    //   ccValue = 0;
-    // }
-    // if (ccValue <= 7 && i ==3) {
-    //   ccValue = 0;
-    // }
-      
-      // Send MIDI CC message with a unique CC number for each potentiometer
-      MIDI.sendControlChange(BASE_CC_NUMBER + i, ccValue, MIDI_OUT_CH);
-
-      // Debugging output to Serial Monitor
-      // Serial.print("Potentiometer ");
-      // Serial.print(i);
-      // Serial.print(" RAW value: ");
-      // Serial.print(rawValue);
-      // Serial.print(" FILT value: ");
-      // Serial.print(filteredValue);
-      // Serial.print(" mapped to CC: ");
-      // Serial.print(BASE_CC_NUMBER + i);
-      // Serial.print(" with value: ");
-      // Serial.println(ccValue);
+    
+    // Handle pots (CC 20-27)
+    for (int potNum = 1; potNum <= NUM_POTS; potNum++) {
+      int channel = findChannelForPot(potNum);
+      if (channel >= 0) {
+        int value = readCalibratedPot(channel);
+        
+        if (abs(value - previousPotValues[channel]) >= 3) {
+          MIDI.sendControlChange(20 + potNum - 1, value, MIDI_OUT_CH);
+          previousPotValues[channel] = value;
+          
+          // Console log for pot
+          Serial.print("Pot #");
+          Serial.print(potNum);
+          Serial.print(" (Channel ");
+          Serial.print(channel);
+          Serial.print(") -> CC");
+          Serial.print(20 + potNum - 1);
+          Serial.print(" = ");
+          Serial.println(value);
+        }
+      }
     }
   }
-}
-
-void sendRelativeCC(int encoderIndex, int32_t delta) {
-  uint8_t relativeValue = 0;
-
-  if (delta > 0) {
-    relativeValue = 1;  // Small increment
-  } else if (delta < 0) {
-    relativeValue = 127;  // Small decrement
-  }
-
-  // Send relative MIDI CC message for the given encoder
-  MIDI.sendControlChange(encoderIndex, relativeValue, MIDI_OUT_CH);
 }
 
 void readMIDI() {
@@ -735,17 +618,4 @@ uint32_t velocityToColor(int velocity) {
     
     default: return keypadPixels.Color(0x1E, 0x1E, 0x1E);   // Off (default)
   }
-}
-
-void selectMuxChannel(uint8_t channel) {
-  digitalWrite(MUX_S0, channel & 0x01);
-  digitalWrite(MUX_S1, (channel >> 1) & 0x01);
-  digitalWrite(MUX_S2, (channel >> 2) & 0x01);
-  digitalWrite(MUX_S3, (channel >> 3) & 0x01);
-}
-
-int readMuxChannel(uint8_t channel) {
-  selectMuxChannel(channel);                // Set multiplexer to the specified channel
-  delayMicroseconds(10);                    // Short delay for stability
-  return analogRead(MUX_ANALOG_PIN);        // Read the analog value
 }
