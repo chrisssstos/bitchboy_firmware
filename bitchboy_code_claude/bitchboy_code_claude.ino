@@ -487,7 +487,7 @@ uint32_t velocityToColor(int velocity) {
   // Note: The table values are in hex, we'll convert them to decimal RGB components (0-255)
   
   switch (velocity) {
-    case 0: return keypadPixels.Color(0x04, 0x04, 0x04);    // #BBOY GRAY
+    case 0: return keypadPixels.Color(0x06, 0x06, 0x06);    // #BBOY GRAY
     case 1: return keypadPixels.Color(0x1E, 0x1E, 0x1E);    // #1E1E1E
     case 2: return keypadPixels.Color(0x7F, 0x7F, 0x7F);    // #7F7F7F
     case 3: return keypadPixels.Color(0xFF, 0xFF, 0xFF);    // #FFFFFF
