@@ -123,8 +123,8 @@ uint8_t const desc_hid_keyboard[] = {
 // HID Keyboard keycodes
 #define KEY_MOD_LGUI   0x08  // Left GUI (Cmd on Mac)
 #define KEY_MOD_LCTRL  0x01  // Left Control
-#define KEY_EQUAL      0x2E  // = key (Shift+= is +)
-#define KEY_MINUS      0x2D  // - key
+#define KEY_MOD_LSHIFT 0x02  // Left Shift
+#define KEY_M          0x10  // M key
 
 // Define the number of rows and columns for the keypad
 #define ROWS 8
@@ -737,13 +737,13 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
   Serial.println("Trackpad disconnected");
 }
 
-// Send a keyboard keypress (modifier + key), then release
-void sendZoomKey(bool zoomIn) {
+// Send Cmd+Shift+M keypress, then release
+void sendPinchKey() {
   uint8_t keyReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-  // Press: Cmd (GUI) + key
-  keyReport[0] = KEY_MOD_LGUI;  // Modifier: Left GUI (Cmd on Mac)
-  keyReport[2] = zoomIn ? KEY_EQUAL : KEY_MINUS;  // = for zoom in, - for zoom out
+  // Press: Cmd + Shift + M
+  keyReport[0] = KEY_MOD_LGUI | KEY_MOD_LSHIFT;  // Modifier: Cmd + Shift
+  keyReport[2] = KEY_M;
   usb_keyboard.sendReport(0, keyReport, 8);
 
   delay(10);  // Small delay for key press
@@ -773,27 +773,24 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
     usb_hid.sendReport(0, report_out, 5);
   }
   else if (len == 4 && report[0] == 0x08) {
-    // Pinch/Zoom gesture
+    // Pinch gesture - send Cmd+Shift+M for either direction
     // Format: [ID=08] [flags] [unused] [gesture_type]
     // flags: 0x08 = gesture active, 0x00 = idle
-    // gesture_type: 0x56 = zoom IN, 0x57 = zoom OUT
-    static unsigned long lastZoomTime = 0;
-    const unsigned long ZOOM_RATE_LIMIT_MS = 150;  // Only send zoom every 150ms
+    // gesture_type: 0x56 = pinch out, 0x57 = pinch in
+    static unsigned long lastPinchTime = 0;
+    const unsigned long PINCH_RATE_LIMIT_MS = 500;  // Only send every 500ms
 
     uint8_t flags = report[1];
     uint8_t gestureType = report[3];
 
     if (flags & 0x08) {
       unsigned long now = millis();
-      if (now - lastZoomTime >= ZOOM_RATE_LIMIT_MS) {
-        if (gestureType == 0x56) {
-          sendZoomKey(true);   // Cmd + = (zoom in)
-          Serial.println("Zoom IN");
-        } else if (gestureType == 0x57) {
-          sendZoomKey(false);  // Cmd + - (zoom out)
-          Serial.println("Zoom OUT");
+      if (now - lastPinchTime >= PINCH_RATE_LIMIT_MS) {
+        if (gestureType == 0x56 || gestureType == 0x57) {
+          sendPinchKey();  // Cmd + Shift + M
+          Serial.println("Pinch -> Cmd+Shift+M");
+          lastPinchTime = now;
         }
-        lastZoomTime = now;
       }
     }
   }
