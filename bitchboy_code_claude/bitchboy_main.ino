@@ -91,6 +91,41 @@ uint8_t const desc_hid_report[] = {
   0xC0               // End Collection
 };
 
+// Separate keyboard HID for zoom gestures
+Adafruit_USBD_HID usb_keyboard;
+
+uint8_t const desc_hid_keyboard[] = {
+  0x05, 0x01,        // Usage Page (Generic Desktop)
+  0x09, 0x06,        // Usage (Keyboard)
+  0xA1, 0x01,        // Collection (Application)
+  0x05, 0x07,        //   Usage Page (Key Codes)
+  0x19, 0xE0,        //   Usage Minimum (224) - Left Control
+  0x29, 0xE7,        //   Usage Maximum (231) - Right GUI
+  0x15, 0x00,        //   Logical Minimum (0)
+  0x25, 0x01,        //   Logical Maximum (1)
+  0x75, 0x01,        //   Report Size (1)
+  0x95, 0x08,        //   Report Count (8)
+  0x81, 0x02,        //   Input (Data,Var,Abs) - Modifier byte
+  0x95, 0x01,        //   Report Count (1)
+  0x75, 0x08,        //   Report Size (8)
+  0x81, 0x01,        //   Input (Const) - Reserved byte
+  0x95, 0x06,        //   Report Count (6)
+  0x75, 0x08,        //   Report Size (8)
+  0x15, 0x00,        //   Logical Minimum (0)
+  0x25, 0x65,        //   Logical Maximum (101)
+  0x05, 0x07,        //   Usage Page (Key Codes)
+  0x19, 0x00,        //   Usage Minimum (0)
+  0x29, 0x65,        //   Usage Maximum (101)
+  0x81, 0x00,        //   Input (Data,Array)
+  0xC0               // End Collection
+};
+
+// HID Keyboard keycodes
+#define KEY_MOD_LGUI   0x08  // Left GUI (Cmd on Mac)
+#define KEY_MOD_LCTRL  0x01  // Left Control
+#define KEY_EQUAL      0x2E  // = key (Shift+= is +)
+#define KEY_MINUS      0x2D  // - key
+
 // Define the number of rows and columns for the keypad
 #define ROWS 8
 #define COLS 8
@@ -195,6 +230,10 @@ void setup() {
   usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
   usb_hid.begin();
 
+  // Initialize USB HID keyboard for zoom gestures
+  usb_keyboard.setReportDescriptor(desc_hid_keyboard, sizeof(desc_hid_keyboard));
+  usb_keyboard.begin();
+
   MIDI.begin(MIDI_OUT_CH);
   keypadPixels.begin();
   keypadPixels.setBrightness(50); // Default brightness
@@ -224,7 +263,7 @@ void setup() {
   keypadPixels.show();
 
   analogReadResolution(12);
-  
+
   Serial.println("Setup complete!");
 }
 
@@ -237,7 +276,7 @@ void loop() {
 
   // Handle pots and sliders
   updatePotValues();
-  
+
   unsigned long currentTime = millis();
   if (inBatch && (currentTime - lastMessageTime > batchTimeout)) {
     inBatch = false;
@@ -268,11 +307,11 @@ void handleKeypad() {
     int keyIndex = (row * COLS) + col;
     if (keyIndex >= 0 && keyIndex < NUMPIXELS) {
       int midiNote = padToNote[keyIndex];
-      
+
       if (pressed) {
         // Send Note On message with velocity 127
         MIDI.sendNoteOn(midiNote, 127, MIDI_OUT_CH);
-        
+
         // Console log for button press
         Serial.print("Button pressed -> Row:");
         Serial.print(row);
@@ -286,7 +325,7 @@ void handleKeypad() {
       } else {
         // Send Note Off message
         MIDI.sendNoteOff(midiNote, 0, MIDI_OUT_CH);
-        
+
         // Console log for button release
         Serial.print("Button released -> Row:");
         Serial.print(row);
@@ -319,17 +358,17 @@ int findChannelForPot(int potNum) {
 int readCalibratedSlider(int channel) {
   mux.channel(channel);
   delayMicroseconds(100);
-  
+
   long sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogRead(SLIDERS_PIN);
     delayMicroseconds(10);
   }
   int rawValue = sum / 10;
-  
+
   if (smoothedSliderValues[channel] == 0) smoothedSliderValues[channel] = rawValue;
   smoothedSliderValues[channel] = (smoothedSliderValues[channel] * 0.6) + (rawValue * 0.4);
-  
+
   int calibratedValue = map((int)smoothedSliderValues[channel], sliderMinValues[channel], sliderMaxValues[channel], 0, 1270);
   calibratedValue = (calibratedValue + 5) / 10;
 
@@ -349,24 +388,24 @@ int readCalibratedSlider(int channel) {
   // Serial.print((int)smoothedSliderValues[channel]);
   // Serial.print(" CALIBRATED:");
   // Serial.println(calibratedValue);
-  
+
   return constrain(calibratedValue, 0, 127);
 }
 
 int readCalibratedPot(int channel) {
   mux.channel(channel);
   delayMicroseconds(100);
-  
+
   long sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogRead(POTS_PIN);
     delayMicroseconds(10);
   }
   int rawValue = sum / 10;
-  
+
   if (smoothedPotValues[channel] == 0) smoothedPotValues[channel] = rawValue;
   smoothedPotValues[channel] = (smoothedPotValues[channel] * 0.6) + (rawValue * 0.4);
-  
+
   int calibratedValue = map((int)smoothedPotValues[channel], potMinValues[channel], potMaxValues[channel], 0, 1270);
   calibratedValue = (calibratedValue + 5) / 10;
 
@@ -386,7 +425,7 @@ int readCalibratedPot(int channel) {
   // Serial.print((int)smoothedPotValues[channel]);
   // Serial.print(" CALIBRATED:");
   // Serial.println(calibratedValue);
-  
+
   return constrain(calibratedValue, 0, 127);
 }
 
@@ -394,17 +433,17 @@ void updatePotValues() {
   static unsigned long lastUpdate = 0;
   if (millis() - lastUpdate > 5) {
     lastUpdate = millis();
-    
+
     // Handle sliders (CC 0-11)
     for (int sliderNum = 1; sliderNum <= NUM_SLIDERS; sliderNum++) {
       int channel = findChannelForSlider(sliderNum);
       if (channel >= 0) {
         int value = readCalibratedSlider(channel);
-        
+
         if (abs(value - previousSliderValues[channel]) >= 3) {
           MIDI.sendControlChange(sliderNum - 1, value, MIDI_OUT_CH);
           previousSliderValues[channel] = value;
-          
+
           // Console log for slider
           Serial.print("Slider #");
           Serial.print(sliderNum);
@@ -417,17 +456,17 @@ void updatePotValues() {
         }
       }
     }
-    
+
     // Handle pots (CC 20-27)
     for (int potNum = 1; potNum <= NUM_POTS; potNum++) {
       int channel = findChannelForPot(potNum);
       if (channel >= 0) {
         int value = readCalibratedPot(channel);
-        
+
         if (abs(value - previousPotValues[channel]) >= 3) {
           MIDI.sendControlChange(20 + potNum - 1, value, MIDI_OUT_CH);
           previousPotValues[channel] = value;
-          
+
           // Console log for pot
           Serial.print("Pot #");
           Serial.print(potNum);
@@ -534,7 +573,7 @@ uint32_t velocityToColor(int velocity) {
   // Convert velocity to RGB color based on the provided table
   // Format: case velocity: return keypadPixels.Color(R, G, B);
   // Note: The table values are in hex, we'll convert them to decimal RGB components (0-255)
-  
+
   switch (velocity) {
     case 0: return keypadPixels.Color(0x06, 0x06, 0x06);    // #BBOY GRAY
     case 1: return keypadPixels.Color(0x1E, 0x1E, 0x1E);    // #1E1E1E
@@ -698,6 +737,22 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
   Serial.println("Trackpad disconnected");
 }
 
+// Send a keyboard keypress (modifier + key), then release
+void sendZoomKey(bool zoomIn) {
+  uint8_t keyReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+  // Press: Cmd (GUI) + key
+  keyReport[0] = KEY_MOD_LGUI;  // Modifier: Left GUI (Cmd on Mac)
+  keyReport[2] = zoomIn ? KEY_EQUAL : KEY_MINUS;  // = for zoom in, - for zoom out
+  usb_keyboard.sendReport(0, keyReport, 8);
+
+  delay(10);  // Small delay for key press
+
+  // Release all keys
+  memset(keyReport, 0, 8);
+  usb_keyboard.sendReport(0, keyReport, 8);
+}
+
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
   if (!usb_hid.ready()) {
     tuh_hid_receive_report(dev_addr, instance);
@@ -718,10 +773,29 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
     usb_hid.sendReport(0, report_out, 5);
   }
   else if (len == 4 && report[0] == 0x08) {
-    // Pinch gesture - map to Ctrl+Scroll for zoom
-    // For now just forward as button press
-    report_out[0] = report[1];
-    usb_hid.sendReport(0, report_out, 5);
+    // Pinch/Zoom gesture
+    // Format: [ID=08] [flags] [unused] [gesture_type]
+    // flags: 0x08 = gesture active, 0x00 = idle
+    // gesture_type: 0x56 = zoom IN, 0x57 = zoom OUT
+    static unsigned long lastZoomTime = 0;
+    const unsigned long ZOOM_RATE_LIMIT_MS = 150;  // Only send zoom every 150ms
+
+    uint8_t flags = report[1];
+    uint8_t gestureType = report[3];
+
+    if (flags & 0x08) {
+      unsigned long now = millis();
+      if (now - lastZoomTime >= ZOOM_RATE_LIMIT_MS) {
+        if (gestureType == 0x56) {
+          sendZoomKey(true);   // Cmd + = (zoom in)
+          Serial.println("Zoom IN");
+        } else if (gestureType == 0x57) {
+          sendZoomKey(false);  // Cmd + - (zoom out)
+          Serial.println("Zoom OUT");
+        }
+        lastZoomTime = now;
+      }
+    }
   }
 
   tuh_hid_receive_report(dev_addr, instance);
