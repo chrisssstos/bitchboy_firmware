@@ -737,11 +737,24 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
   Serial.println("Trackpad disconnected");
 }
 
-// Send Cmd+Shift+M keypress, then release
+// Send pinch key shortcut for both Mac and Windows
 void sendPinchKey() {
   uint8_t keyReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-  // Press: Cmd + Shift + M
+  // First send Ctrl+Shift+M (for Windows)
+  keyReport[0] = KEY_MOD_LCTRL | KEY_MOD_LSHIFT;  // Modifier: Ctrl + Shift
+  keyReport[2] = KEY_M;
+  usb_keyboard.sendReport(0, keyReport, 8);
+
+  delay(10);  // Small delay for key press
+
+  // Release all keys
+  memset(keyReport, 0, 8);
+  usb_keyboard.sendReport(0, keyReport, 8);
+
+  delay(10);  // Small delay between shortcuts
+
+  // Then send Cmd+Shift+M (for Mac)
   keyReport[0] = KEY_MOD_LGUI | KEY_MOD_LSHIFT;  // Modifier: Cmd + Shift
   keyReport[2] = KEY_M;
   usb_keyboard.sendReport(0, keyReport, 8);
@@ -787,8 +800,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
       unsigned long now = millis();
       if (now - lastPinchTime >= PINCH_RATE_LIMIT_MS) {
         if (gestureType == 0x56 || gestureType == 0x57) {
-          sendPinchKey();  // Cmd + Shift + M
-          Serial.println("Pinch -> Cmd+Shift+M");
+          sendPinchKey();  // Ctrl+Shift+M (Windows) + Cmd+Shift+M (Mac)
+          Serial.println("Pinch -> Ctrl+Shift+M (Win) / Cmd+Shift+M (Mac)");
           lastPinchTime = now;
         }
       }
