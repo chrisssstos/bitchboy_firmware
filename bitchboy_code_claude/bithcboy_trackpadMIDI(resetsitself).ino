@@ -5,6 +5,7 @@
 #include <MIDI.h>
 #include <pio_usb.h>
 #include "tusb.h"
+#include <hardware/watchdog.h>
 
 // USB Host pin for trackpad (D+ line)
 #define HOST_PIN_DP 1
@@ -90,6 +91,41 @@ uint8_t const desc_hid_report[] = {
   0xC0,              //   End Collection
   0xC0               // End Collection
 };
+
+// Separate keyboard HID for zoom gestures
+Adafruit_USBD_HID usb_keyboard;
+
+uint8_t const desc_hid_keyboard[] = {
+  0x05, 0x01,        // Usage Page (Generic Desktop)
+  0x09, 0x06,        // Usage (Keyboard)
+  0xA1, 0x01,        // Collection (Application)
+  0x05, 0x07,        //   Usage Page (Key Codes)
+  0x19, 0xE0,        //   Usage Minimum (224) - Left Control
+  0x29, 0xE7,        //   Usage Maximum (231) - Right GUI
+  0x15, 0x00,        //   Logical Minimum (0)
+  0x25, 0x01,        //   Logical Maximum (1)
+  0x75, 0x01,        //   Report Size (1)
+  0x95, 0x08,        //   Report Count (8)
+  0x81, 0x02,        //   Input (Data,Var,Abs) - Modifier byte
+  0x95, 0x01,        //   Report Count (1)
+  0x75, 0x08,        //   Report Size (8)
+  0x81, 0x01,        //   Input (Const) - Reserved byte
+  0x95, 0x06,        //   Report Count (6)
+  0x75, 0x08,        //   Report Size (8)
+  0x15, 0x00,        //   Logical Minimum (0)
+  0x25, 0x65,        //   Logical Maximum (101)
+  0x05, 0x07,        //   Usage Page (Key Codes)
+  0x19, 0x00,        //   Usage Minimum (0)
+  0x29, 0x65,        //   Usage Maximum (101)
+  0x81, 0x00,        //   Input (Data,Array)
+  0xC0               // End Collection
+};
+
+// HID Keyboard keycodes
+#define KEY_MOD_LGUI   0x08  // Left GUI (Cmd on Mac)
+#define KEY_MOD_LCTRL  0x01  // Left Control
+#define KEY_MOD_LSHIFT 0x02  // Left Shift
+#define KEY_M          0x10  // M key
 
 // Define the number of rows and columns for the keypad
 #define ROWS 8
@@ -181,13 +217,20 @@ unsigned long previousMillis = 0;
 const long interval = 500;
 bool flashState = false;
 
-// Trackpad mode toggle (pads 0+4 combo)
-#define TRACKPAD_CC_X 30
-#define TRACKPAD_CC_Y 31
-volatile bool trackpadMidiMode = false;  // false = mouse, true = MIDI
-volatile int trackpadX = 64;  // Accumulated X position (0-127)
-volatile int trackpadY = 64;  // Accumulated Y position (0-127)
-bool padPressed[NUMPIXELS] = {false};  // Track pressed state for combo detection
+// Trackpad health monitoring
+volatile unsigned long lastTrackpadReport = 0;  // Timestamp of last received report
+volatile bool trackpadConnected = false;
+volatile uint8_t trackpadDevAddr = 0;
+volatile uint8_t trackpadInstance = 0;
+volatile unsigned long trackpadReportCount = 0;
+const unsigned long TRACKPAD_TIMEOUT_MS = 15000;  // 15 seconds without data = stalled (for debugging)
+volatile bool trackpadStalled = false;
+volatile uint8_t recoveryAttempts = 0;
+const uint8_t MAX_RECOVERY_ATTEMPTS = 5;
+
+// Core 1 watchdog - updated by loop1, monitored by loop0
+volatile unsigned long core1LastAlive = 0;
+volatile bool core1NeedsReset = false;
 
 void setup() {
   // Set custom USB descriptors before anything else
@@ -201,6 +244,10 @@ void setup() {
   // Initialize USB HID for trackpad mouse output
   usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
   usb_hid.begin();
+
+  // Initialize USB HID keyboard for zoom gestures
+  usb_keyboard.setReportDescriptor(desc_hid_keyboard, sizeof(desc_hid_keyboard));
+  usb_keyboard.begin();
 
   MIDI.begin(MIDI_OUT_CH);
   keypadPixels.begin();
@@ -231,7 +278,7 @@ void setup() {
   keypadPixels.show();
 
   analogReadResolution(12);
-  
+
   Serial.println("Setup complete!");
 }
 
@@ -244,7 +291,7 @@ void loop() {
 
   // Handle pots and sliders
   updatePotValues();
-  
+
   unsigned long currentTime = millis();
   if (inBatch && (currentTime - lastMessageTime > batchTimeout)) {
     inBatch = false;
@@ -261,6 +308,25 @@ void loop() {
   }
 
   keypadPixels.show();
+
+  // Watchdog: check if Core 1 is stuck - reset immediately if detected
+  static unsigned long lastWatchdogCheck = 0;
+  if (millis() - lastWatchdogCheck > 5000) {
+    lastWatchdogCheck = millis();
+    if (core1LastAlive > 0) {
+      unsigned long core1Age = millis() - core1LastAlive;
+      if (core1Age > 30000) {  // Core 1 hasn't responded in 30 seconds
+        Serial.println("[Core0] !!! Core 1 STUCK - USBHost.task() hanging !!!");
+        Serial.print("[Core0] Last alive: ");
+        Serial.print(core1Age / 1000);
+        Serial.println("s ago");
+        Serial.println("[Core0] RESETTING CHIP NOW via hardware watchdog");
+        delay(100);  // Let serial flush
+        watchdog_enable(1, false);  // Enable watchdog with 1ms timeout = immediate reset
+        while(1);  // Wait for reset
+      }
+    }
+  }
 }
 
 void handleKeypad() {
@@ -275,25 +341,6 @@ void handleKeypad() {
     int keyIndex = (row * COLS) + col;
     if (keyIndex >= 0 && keyIndex < NUMPIXELS) {
       int midiNote = padToNote[keyIndex];
-
-      // Track pressed state for combo detection
-      padPressed[keyIndex] = pressed;
-
-      // Check for trackpad mode toggle combo (pads 0 + 4)
-      if (pressed && padPressed[0] && padPressed[4]) {
-        trackpadMidiMode = !trackpadMidiMode;
-        // Reset trackpad position to center when switching to MIDI mode
-        if (trackpadMidiMode) {
-          trackpadX = 64;
-          trackpadY = 64;
-        }
-        Serial.print("Trackpad mode: ");
-        Serial.println(trackpadMidiMode ? "MIDI (CC 30/31)" : "Mouse");
-        // Brief flash feedback on pad 0
-        keypadPixels.setPixelColor(padToPixel[0], trackpadMidiMode ?
-          keypadPixels.Color(0, 255, 0) : keypadPixels.Color(0, 0, 255));
-        keypadPixels.show();
-      }
 
       if (pressed) {
         // Send Note On message with velocity 127
@@ -345,17 +392,17 @@ int findChannelForPot(int potNum) {
 int readCalibratedSlider(int channel) {
   mux.channel(channel);
   delayMicroseconds(100);
-  
+
   long sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogRead(SLIDERS_PIN);
     delayMicroseconds(10);
   }
   int rawValue = sum / 10;
-  
+
   if (smoothedSliderValues[channel] == 0) smoothedSliderValues[channel] = rawValue;
   smoothedSliderValues[channel] = (smoothedSliderValues[channel] * 0.6) + (rawValue * 0.4);
-  
+
   int calibratedValue = map((int)smoothedSliderValues[channel], sliderMinValues[channel], sliderMaxValues[channel], 0, 1270);
   calibratedValue = (calibratedValue + 5) / 10;
 
@@ -375,24 +422,24 @@ int readCalibratedSlider(int channel) {
   // Serial.print((int)smoothedSliderValues[channel]);
   // Serial.print(" CALIBRATED:");
   // Serial.println(calibratedValue);
-  
+
   return constrain(calibratedValue, 0, 127);
 }
 
 int readCalibratedPot(int channel) {
   mux.channel(channel);
   delayMicroseconds(100);
-  
+
   long sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogRead(POTS_PIN);
     delayMicroseconds(10);
   }
   int rawValue = sum / 10;
-  
+
   if (smoothedPotValues[channel] == 0) smoothedPotValues[channel] = rawValue;
   smoothedPotValues[channel] = (smoothedPotValues[channel] * 0.6) + (rawValue * 0.4);
-  
+
   int calibratedValue = map((int)smoothedPotValues[channel], potMinValues[channel], potMaxValues[channel], 0, 1270);
   calibratedValue = (calibratedValue + 5) / 10;
 
@@ -412,7 +459,7 @@ int readCalibratedPot(int channel) {
   // Serial.print((int)smoothedPotValues[channel]);
   // Serial.print(" CALIBRATED:");
   // Serial.println(calibratedValue);
-  
+
   return constrain(calibratedValue, 0, 127);
 }
 
@@ -420,17 +467,17 @@ void updatePotValues() {
   static unsigned long lastUpdate = 0;
   if (millis() - lastUpdate > 5) {
     lastUpdate = millis();
-    
+
     // Handle sliders (CC 0-11)
     for (int sliderNum = 1; sliderNum <= NUM_SLIDERS; sliderNum++) {
       int channel = findChannelForSlider(sliderNum);
       if (channel >= 0) {
         int value = readCalibratedSlider(channel);
-        
+
         if (abs(value - previousSliderValues[channel]) >= 3) {
           MIDI.sendControlChange(sliderNum - 1, value, MIDI_OUT_CH);
           previousSliderValues[channel] = value;
-          
+
           // Console log for slider
           Serial.print("Slider #");
           Serial.print(sliderNum);
@@ -443,17 +490,17 @@ void updatePotValues() {
         }
       }
     }
-    
+
     // Handle pots (CC 20-27)
     for (int potNum = 1; potNum <= NUM_POTS; potNum++) {
       int channel = findChannelForPot(potNum);
       if (channel >= 0) {
         int value = readCalibratedPot(channel);
-        
+
         if (abs(value - previousPotValues[channel]) >= 3) {
           MIDI.sendControlChange(20 + potNum - 1, value, MIDI_OUT_CH);
           previousPotValues[channel] = value;
-          
+
           // Console log for pot
           Serial.print("Pot #");
           Serial.print(potNum);
@@ -560,7 +607,7 @@ uint32_t velocityToColor(int velocity) {
   // Convert velocity to RGB color based on the provided table
   // Format: case velocity: return keypadPixels.Color(R, G, B);
   // Note: The table values are in hex, we'll convert them to decimal RGB components (0-255)
-  
+
   switch (velocity) {
     case 0: return keypadPixels.Color(0x06, 0x06, 0x06);    // #BBOY GRAY
     case 1: return keypadPixels.Color(0x1E, 0x1E, 0x1E);    // #1E1E1E
@@ -706,76 +753,315 @@ void setup1() {
   pio_cfg.pinout = PIO_USB_PINOUT_DMDP;
   USBHost.configure_pio_usb(1, &pio_cfg);
   USBHost.begin(1);
+  core1LastAlive = millis();  // Initialize watchdog
   Serial.println("USB Host ready");
 }
 
 void loop1() {
+  // Track if USBHost.task() is hanging
+  static unsigned long taskStartTime = 0;
+  static bool taskRunning = false;
+
+  taskStartTime = millis();
+  taskRunning = true;
+
   USBHost.task();
+
+  taskRunning = false;
+  core1LastAlive = millis();  // Update watchdog timestamp
+
+  unsigned long taskDuration = millis() - taskStartTime;
+  if (taskDuration > 100) {
+    Serial.print("[Core1] WARNING: USBHost.task() took ");
+    Serial.print(taskDuration);
+    Serial.println("ms");
+  }
+
+  // Check if Core 0 requested a reset
+  if (core1NeedsReset) {
+    core1NeedsReset = false;
+    Serial.println("[Core1] Reset requested by Core 0 - reinitializing USB Host");
+
+    trackpadConnected = false;
+    trackpadDevAddr = 0;
+    trackpadInstance = 0;
+    trackpadStalled = false;
+    recoveryAttempts = 0;
+
+    pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
+    pio_cfg.pin_dp = HOST_PIN_DP;
+    pio_cfg.pinout = PIO_USB_PINOUT_DMDP;
+    USBHost.configure_pio_usb(1, &pio_cfg);
+    USBHost.begin(1);
+    Serial.println("[Core1] USB Host re-initialized");
+  }
+
+  // Periodic heartbeat to confirm loop1 is running
+  static unsigned long lastHeartbeat = 0;
+  unsigned long now = millis();
+  if (now - lastHeartbeat > 10000) {  // Every 10 seconds
+    lastHeartbeat = now;
+    Serial.print("[Core1] Heartbeat - connected:");
+    Serial.print(trackpadConnected);
+    Serial.print(" reports:");
+    Serial.print(trackpadReportCount);
+    Serial.print(" lastReport:");
+    Serial.print(lastTrackpadReport > 0 ? (now - lastTrackpadReport) / 1000 : -1);
+    Serial.println("s ago");
+  }
+
+  // Periodic "kick" to USB stack even when not stalled - helps prevent stalls
+  static unsigned long lastKick = 0;
+  if (trackpadConnected && trackpadDevAddr > 0 && !trackpadStalled && (now - lastKick > 5000)) {
+    lastKick = now;
+    // Only kick if we haven't received a report recently
+    if (now - lastTrackpadReport > 3000) {
+      tuh_hid_receive_report(trackpadDevAddr, trackpadInstance);
+    }
+  }
+
+  // Check for trackpad stall condition
+  if (trackpadConnected && lastTrackpadReport > 0) {
+    unsigned long timeSinceReport = now - lastTrackpadReport;
+
+    if (timeSinceReport > TRACKPAD_TIMEOUT_MS && !trackpadStalled) {
+      trackpadStalled = true;
+      recoveryAttempts = 0;
+      Serial.println("!!! TRACKPAD STALLED - No reports for 3+ seconds !!!");
+      Serial.print("Last report was ");
+      Serial.print(timeSinceReport);
+      Serial.println("ms ago");
+      Serial.print("Total reports received: ");
+      Serial.println(trackpadReportCount);
+    }
+
+    // Aggressive recovery attempts every 1 second while stalled
+    static unsigned long lastRecoveryAttempt = 0;
+    if (trackpadStalled && trackpadDevAddr > 0 && (now - lastRecoveryAttempt > 1000)) {
+      lastRecoveryAttempt = now;
+      recoveryAttempts++;
+
+      Serial.print("Recovery attempt #");
+      Serial.print(recoveryAttempts);
+      Serial.println("...");
+
+      if (recoveryAttempts <= 2) {
+        // First attempts: just try receive_report
+        bool result = tuh_hid_receive_report(trackpadDevAddr, trackpadInstance);
+        Serial.print("  receive_report: ");
+        Serial.println(result ? "OK" : "FAIL");
+      } else if (recoveryAttempts <= 5) {
+        // Later attempts: reset protocol then request
+        Serial.println("  Resetting HID protocol...");
+        tuh_hid_set_protocol(trackpadDevAddr, trackpadInstance, HID_PROTOCOL_REPORT);
+        delay(50);
+        bool result = tuh_hid_receive_report(trackpadDevAddr, trackpadInstance);
+        Serial.print("  receive_report after protocol reset: ");
+        Serial.println(result ? "OK" : "FAIL");
+      } else if (recoveryAttempts == 10) {
+        // After 10 failed attempts, try full USB host re-init
+        Serial.println("  !!! Attempting full USB host re-initialization !!!");
+
+        // Mark as disconnected first
+        trackpadConnected = false;
+        trackpadDevAddr = 0;
+        trackpadInstance = 0;
+
+        // Re-initialize USB Host
+        pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
+        pio_cfg.pin_dp = HOST_PIN_DP;
+        pio_cfg.pinout = PIO_USB_PINOUT_DMDP;
+        USBHost.configure_pio_usb(1, &pio_cfg);
+        USBHost.begin(1);
+
+        Serial.println("  USB Host re-initialized, waiting for trackpad...");
+        trackpadStalled = false;  // Reset stall state, let mount callback handle it
+        recoveryAttempts = 0;
+      } else {
+        // Keep trying with longer delays
+        Serial.println("  Extended recovery attempt...");
+        delay(100);
+        tuh_hid_set_protocol(trackpadDevAddr, trackpadInstance, HID_PROTOCOL_REPORT);
+        delay(100);
+        bool result = tuh_hid_receive_report(trackpadDevAddr, trackpadInstance);
+        Serial.print("  receive_report: ");
+        Serial.println(result ? "OK" : "FAIL");
+      }
+    }
+
+    // Print periodic status while stalled
+    static unsigned long lastStallPrint = 0;
+    if (trackpadStalled && (now - lastStallPrint > 5000)) {
+      lastStallPrint = now;
+      Serial.print("Still stalled. Time since last report: ");
+      Serial.print(timeSinceReport / 1000);
+      Serial.print("s (recovery attempts: ");
+      Serial.print(recoveryAttempts);
+      Serial.println(")");
+    }
+  }
 }
 
 // TinyUSB Host HID callbacks
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
-  Serial.println("Trackpad connected");
+  Serial.println("=== TRACKPAD CONNECTED ===");
+  Serial.print("  Device address: ");
+  Serial.println(dev_addr);
+  Serial.print("  Instance: ");
+  Serial.println(instance);
+  Serial.print("  Descriptor length: ");
+  Serial.println(desc_len);
+
+  // Store connection info for recovery
+  trackpadConnected = true;
+  trackpadDevAddr = dev_addr;
+  trackpadInstance = instance;
+  trackpadReportCount = 0;
+  trackpadStalled = false;
+  recoveryAttempts = 0;
+  lastTrackpadReport = millis();
+
   tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_REPORT);
-  tuh_hid_receive_report(dev_addr, instance);
+
+  bool result = tuh_hid_receive_report(dev_addr, instance);
+  Serial.print("  Initial receive_report result: ");
+  Serial.println(result ? "SUCCESS" : "FAILED");
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-  Serial.println("Trackpad disconnected");
+  Serial.println("=== TRACKPAD DISCONNECTED ===");
+  Serial.print("  Device address: ");
+  Serial.println(dev_addr);
+  Serial.print("  Total reports received this session: ");
+  Serial.println(trackpadReportCount);
+
+  // Clear connection state
+  trackpadConnected = false;
+  trackpadDevAddr = 0;
+  trackpadInstance = 0;
+  trackpadStalled = false;
+}
+
+// Send pinch key shortcut for both Mac and Windows
+void sendPinchKey() {
+  uint8_t keyReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+  // First send Ctrl+Shift+M (for Windows)
+  keyReport[0] = KEY_MOD_LCTRL | KEY_MOD_LSHIFT;  // Modifier: Ctrl + Shift
+  keyReport[2] = KEY_M;
+  usb_keyboard.sendReport(0, keyReport, 8);
+
+  delay(10);  // Small delay for key press
+
+  // Release all keys
+  memset(keyReport, 0, 8);
+  usb_keyboard.sendReport(0, keyReport, 8);
+
+  delay(10);  // Small delay between shortcuts
+
+  // Then send Cmd+Shift+M (for Mac)
+  keyReport[0] = KEY_MOD_LGUI | KEY_MOD_LSHIFT;  // Modifier: Cmd + Shift
+  keyReport[2] = KEY_M;
+  usb_keyboard.sendReport(0, keyReport, 8);
+
+  delay(10);  // Small delay for key press
+
+  // Release all keys
+  memset(keyReport, 0, 8);
+  usb_keyboard.sendReport(0, keyReport, 8);
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
+  // Update health tracking
+  lastTrackpadReport = millis();
+  trackpadReportCount++;
+
+  // Clear stalled state if we were stalled
+  if (trackpadStalled) {
+    trackpadStalled = false;
+    Serial.println("=== TRACKPAD RECOVERED ===");
+    Serial.print("  After ");
+    Serial.print(recoveryAttempts);
+    Serial.println(" recovery attempts");
+    Serial.print("  Total reports received: ");
+    Serial.println(trackpadReportCount);
+    recoveryAttempts = 0;
+  }
+
+  if (!usb_hid.ready()) {
+    bool result = tuh_hid_receive_report(dev_addr, instance);
+    if (!result) {
+      Serial.println("WARNING: receive_report failed (HID not ready path)");
+    }
+    return;
+  }
+
+  uint8_t report_out[5] = {0, 0, 0, 0, 0};  // buttons, x, y, wheel, pan
+
   if (len == 6 && report[0] == 0x06) {
     // Normal movement + scroll
     // Format: [ID=06] [buttons] [X] [Y] [V-scroll] [H-scroll]
+    report_out[0] = report[1];           // buttons
+    report_out[1] = report[2];           // X
+    report_out[2] = report[3];           // Y
+    report_out[3] = (int8_t)report[4];   // vertical scroll
+    report_out[4] = (int8_t)report[5];   // horizontal scroll (pan)
 
-    if (trackpadMidiMode) {
-      // MIDI mode: convert relative X/Y to CC messages
-      int8_t deltaX = (int8_t)report[2];
-      int8_t deltaY = (int8_t)report[3];
-
-      // Accumulate movement (scale down for smoother control)
-      int newX = trackpadX + (deltaX / 4);
-      int newY = trackpadY - (deltaY / 4);  // Invert Y for natural feel
-
-      // Clamp to 0-127
-      newX = constrain(newX, 0, 127);
-      newY = constrain(newY, 0, 127);
-
-      // Send CC only if value changed
-      if (newX != trackpadX) {
-        trackpadX = newX;
-        MIDI.sendControlChange(TRACKPAD_CC_X, trackpadX, MIDI_OUT_CH);
-      }
-      if (newY != trackpadY) {
-        trackpadY = newY;
-        MIDI.sendControlChange(TRACKPAD_CC_Y, trackpadY, MIDI_OUT_CH);
-      }
-    } else {
-      // Mouse mode: forward HID report
-      if (!usb_hid.ready()) {
-        tuh_hid_receive_report(dev_addr, instance);
-        return;
-      }
-
-      uint8_t report_out[5] = {0, 0, 0, 0, 0};
-      report_out[0] = report[1];           // buttons
-      report_out[1] = report[2];           // X
-      report_out[2] = report[3];           // Y
-      report_out[3] = (int8_t)report[4];   // vertical scroll
-      report_out[4] = (int8_t)report[5];   // horizontal scroll (pan)
-
-      usb_hid.sendReport(0, report_out, 5);
-    }
+    usb_hid.sendReport(0, report_out, 5);
+    delayMicroseconds(100);  // Small delay to let USB settle
   }
   else if (len == 4 && report[0] == 0x08) {
-    // Pinch gesture - only forward in mouse mode
-    if (!trackpadMidiMode && usb_hid.ready()) {
-      uint8_t report_out[5] = {0, 0, 0, 0, 0};
-      report_out[0] = report[1];
-      usb_hid.sendReport(0, report_out, 5);
+    // Pinch gesture - send Cmd+Shift+M for either direction
+    // Format: [ID=08] [flags] [unused] [gesture_type]
+    // flags: 0x08 = gesture active, 0x00 = idle
+    // gesture_type: 0x56 = pinch out, 0x57 = pinch in
+    static unsigned long lastPinchTime = 0;
+    const unsigned long PINCH_RATE_LIMIT_MS = 500;  // Only send every 500ms
+
+    uint8_t flags = report[1];
+    uint8_t gestureType = report[3];
+
+    if (flags & 0x08) {
+      unsigned long now = millis();
+      if (now - lastPinchTime >= PINCH_RATE_LIMIT_MS) {
+        if (gestureType == 0x56 || gestureType == 0x57) {
+          sendPinchKey();  // Ctrl+Shift+M (Windows) + Cmd+Shift+M (Mac)
+          Serial.println("Pinch -> Ctrl+Shift+M (Win) / Cmd+Shift+M (Mac)");
+          lastPinchTime = now;
+        }
+      }
     }
   }
 
-  tuh_hid_receive_report(dev_addr, instance);
+  // Request next report - THIS IS CRITICAL, if this fails the chain breaks
+  bool result = tuh_hid_receive_report(dev_addr, instance);
+  if (!result) {
+    Serial.println("!!! CRITICAL: receive_report FAILED !!!");
+    Serial.print("  Report count before failure: ");
+    Serial.println(trackpadReportCount);
+
+    // Immediate retry attempts
+    for (int retry = 0; retry < 3; retry++) {
+      delay(10);
+      result = tuh_hid_receive_report(dev_addr, instance);
+      Serial.print("  Retry ");
+      Serial.print(retry + 1);
+      Serial.print(": ");
+      Serial.println(result ? "OK" : "FAIL");
+      if (result) break;
+    }
+
+    if (!result) {
+      Serial.println("  All retries failed - trackpad will stop working!");
+      Serial.println("  Try: reset protocol or reconnect");
+
+      // Try resetting protocol as last resort
+      delay(50);
+      tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_REPORT);
+      delay(50);
+      result = tuh_hid_receive_report(dev_addr, instance);
+      Serial.print("  After protocol reset: ");
+      Serial.println(result ? "OK" : "FAIL");
+    }
+  }
 }
