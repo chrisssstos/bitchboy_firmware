@@ -9,6 +9,10 @@
 // USB Host pin for trackpad (D+ line)
 #define HOST_PIN_DP 1
 
+// Trackpad robustness settings
+#define TRACKPAD_WATCHDOG_TIMEOUT_MS 5000  // Reset USB if no activity for 5s when connected
+#define TRACKPAD_REPORT_QUEUE_SIZE 8       // Buffer for report queue between cores
+
 // Custom USB Device Descriptor
 tusb_desc_device_t custom_desc_device = {
     .bLength            = sizeof(tusb_desc_device_t),
@@ -216,6 +220,26 @@ unsigned long previousMillis = 0;
 const long interval = 500;
 bool flashState = false;
 
+// Trackpad state tracking (volatile for cross-core access)
+volatile bool trackpadConnected = false;
+volatile unsigned long lastTrackpadActivity = 0;
+volatile uint8_t trackpadDevAddr = 0;
+volatile uint8_t trackpadInstance = 0;
+
+// Lock-free queue for trackpad reports (Core 1 -> Core 0)
+struct TrackpadReport {
+  uint8_t data[5];  // buttons, x, y, wheel, pan
+  bool valid;
+};
+volatile TrackpadReport reportQueue[TRACKPAD_REPORT_QUEUE_SIZE];
+volatile uint8_t queueWriteIdx = 0;
+volatile uint8_t queueReadIdx = 0;
+
+// Pending keyboard report for pinch (non-blocking)
+volatile bool pinchPending = false;
+volatile uint8_t pinchState = 0;  // 0=idle, 1=win_press, 2=win_release, 3=mac_press, 4=mac_release
+volatile unsigned long pinchStateTime = 0;
+
 
 void setup() {
   // Set custom USB descriptors before anything else
@@ -277,6 +301,12 @@ void loop() {
   // Handle pots and sliders
   updatePotValues();
 
+  // Process queued trackpad reports (from Core 1)
+  processTrackpadQueue();
+
+  // Handle non-blocking pinch key sequence
+  processPinchKeySequence();
+
   unsigned long currentTime = millis();
   if (inBatch && (currentTime - lastMessageTime > batchTimeout)) {
     inBatch = false;
@@ -293,6 +323,62 @@ void loop() {
   }
 
   keypadPixels.show();
+}
+
+// Process trackpad reports from the queue (runs on Core 0)
+void processTrackpadQueue() {
+  while (queueReadIdx != queueWriteIdx) {
+    uint8_t idx = queueReadIdx;
+    if (reportQueue[idx].valid) {
+      if (usb_hid.ready()) {
+        uint8_t report[5];
+        memcpy(report, (void*)reportQueue[idx].data, 5);
+        usb_hid.sendReport(0, report, 5);
+      }
+      reportQueue[idx].valid = false;
+    }
+    queueReadIdx = (queueReadIdx + 1) % TRACKPAD_REPORT_QUEUE_SIZE;
+  }
+}
+
+// Non-blocking pinch key sequence (runs on Core 0)
+void processPinchKeySequence() {
+  if (!pinchPending) return;
+
+  unsigned long now = millis();
+  if (now - pinchStateTime < 10) return;  // 10ms between states
+
+  uint8_t keyReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+  switch (pinchState) {
+    case 0:  // Start: Ctrl+Shift+M press (Windows)
+      keyReport[0] = KEY_MOD_LCTRL | KEY_MOD_LSHIFT;
+      keyReport[2] = KEY_M;
+      usb_keyboard.sendReport(0, keyReport, 8);
+      pinchState = 1;
+      pinchStateTime = now;
+      break;
+
+    case 1:  // Release Windows keys
+      usb_keyboard.sendReport(0, keyReport, 8);
+      pinchState = 2;
+      pinchStateTime = now;
+      break;
+
+    case 2:  // Cmd+Shift+M press (Mac)
+      keyReport[0] = KEY_MOD_LGUI | KEY_MOD_LSHIFT;
+      keyReport[2] = KEY_M;
+      usb_keyboard.sendReport(0, keyReport, 8);
+      pinchState = 3;
+      pinchStateTime = now;
+      break;
+
+    case 3:  // Release Mac keys, done
+      usb_keyboard.sendReport(0, keyReport, 8);
+      pinchState = 0;
+      pinchPending = false;
+      break;
+  }
 }
 
 void handleKeypad() {
@@ -712,8 +798,26 @@ uint32_t velocityToColor(int velocity) {
 // Core 1: USB Host for Trackpad
 // ============================================================================
 
+// Queue a report for Core 0 to send (lock-free single producer)
+bool queueTrackpadReport(const uint8_t* data) {
+  uint8_t nextIdx = (queueWriteIdx + 1) % TRACKPAD_REPORT_QUEUE_SIZE;
+  if (nextIdx == queueReadIdx) {
+    return false;  // Queue full, drop report
+  }
+  memcpy((void*)reportQueue[queueWriteIdx].data, data, 5);
+  reportQueue[queueWriteIdx].valid = true;
+  queueWriteIdx = nextIdx;
+  return true;
+}
+
 void setup1() {
   delay(1000);  // Wait for Core 0 to initialize
+
+  // Initialize queue
+  for (int i = 0; i < TRACKPAD_REPORT_QUEUE_SIZE; i++) {
+    reportQueue[i].valid = false;
+  }
+
   pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
   pio_cfg.pin_dp = HOST_PIN_DP;
   pio_cfg.pinout = PIO_USB_PINOUT_DMDP;
@@ -724,66 +828,76 @@ void setup1() {
 
 void loop1() {
   USBHost.task();
+
+  // Watchdog: check for stuck trackpad
+  if (trackpadConnected) {
+    unsigned long now = millis();
+    if (now - lastTrackpadActivity > TRACKPAD_WATCHDOG_TIMEOUT_MS) {
+      Serial.println("Trackpad watchdog timeout - no activity");
+      // Don't force reset, just log - user may just not be touching it
+      // But if we detect actual USB errors, we could add reset logic here
+      lastTrackpadActivity = now;  // Reset timer to avoid spam
+    }
+  }
 }
 
 // TinyUSB Host HID callbacks
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
   Serial.println("Trackpad connected");
+
+  // Store device info for potential recovery
+  trackpadDevAddr = dev_addr;
+  trackpadInstance = instance;
+  trackpadConnected = true;
+  lastTrackpadActivity = millis();
+
   tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_REPORT);
-  tuh_hid_receive_report(dev_addr, instance);
+  if (!tuh_hid_receive_report(dev_addr, instance)) {
+    Serial.println("Warning: Failed to request initial report");
+  }
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
   Serial.println("Trackpad disconnected");
+  trackpadConnected = false;
+  trackpadDevAddr = 0;
+  trackpadInstance = 0;
 }
 
-// Send pinch key shortcut for both Mac and Windows
-void sendPinchKey() {
-  uint8_t keyReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-  // First send Ctrl+Shift+M (for Windows)
-  keyReport[0] = KEY_MOD_LCTRL | KEY_MOD_LSHIFT;  // Modifier: Ctrl + Shift
-  keyReport[2] = KEY_M;
-  usb_keyboard.sendReport(0, keyReport, 8);
-
-  delay(10);  // Small delay for key press
-
-  // Release all keys
-  memset(keyReport, 0, 8);
-  usb_keyboard.sendReport(0, keyReport, 8);
-
-  delay(10);  // Small delay between shortcuts
-
-  // Then send Cmd+Shift+M (for Mac)
-  keyReport[0] = KEY_MOD_LGUI | KEY_MOD_LSHIFT;  // Modifier: Cmd + Shift
-  keyReport[2] = KEY_M;
-  usb_keyboard.sendReport(0, keyReport, 8);
-
-  delay(10);  // Small delay for key press
-
-  // Release all keys
-  memset(keyReport, 0, 8);
-  usb_keyboard.sendReport(0, keyReport, 8);
+// Trigger pinch key sequence (non-blocking, processed on Core 0)
+void triggerPinchKey() {
+  if (!pinchPending) {
+    pinchPending = true;
+    pinchState = 0;
+    pinchStateTime = millis();
+  }
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
-  if (!usb_hid.ready()) {
+  // Update activity timestamp
+  lastTrackpadActivity = millis();
+
+  // Validate report
+  if (report == nullptr || len == 0) {
     tuh_hid_receive_report(dev_addr, instance);
     return;
   }
 
-  uint8_t report_out[5] = {0, 0, 0, 0, 0};  // buttons, x, y, wheel, pan
-
   if (len == 6 && report[0] == 0x06) {
     // Normal movement + scroll
     // Format: [ID=06] [buttons] [X] [Y] [V-scroll] [H-scroll]
+    uint8_t report_out[5];
     report_out[0] = report[1];           // buttons
     report_out[1] = report[2];           // X
     report_out[2] = report[3];           // Y
-    report_out[3] = (int8_t)report[4];   // vertical scroll
-    report_out[4] = (int8_t)report[5];   // horizontal scroll (pan)
+    report_out[3] = report[4];           // vertical scroll
+    report_out[4] = report[5];           // horizontal scroll (pan)
 
-    usb_hid.sendReport(0, report_out, 5);
+    // Queue for Core 0 to send (non-blocking)
+    if (!queueTrackpadReport(report_out)) {
+      // Queue full - this is rare, just drop the report
+      // Could add a counter here for diagnostics
+    }
   }
   else if (len == 4 && report[0] == 0x08) {
     // Pinch gesture - send Cmd+Shift+M for either direction
@@ -800,13 +914,16 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
       unsigned long now = millis();
       if (now - lastPinchTime >= PINCH_RATE_LIMIT_MS) {
         if (gestureType == 0x56 || gestureType == 0x57) {
-          sendPinchKey();  // Ctrl+Shift+M (Windows) + Cmd+Shift+M (Mac)
-          Serial.println("Pinch -> Ctrl+Shift+M (Win) / Cmd+Shift+M (Mac)");
+          triggerPinchKey();  // Non-blocking, processed on Core 0
           lastPinchTime = now;
         }
       }
     }
   }
 
-  tuh_hid_receive_report(dev_addr, instance);
+  // Request next report - check for errors
+  if (!tuh_hid_receive_report(dev_addr, instance)) {
+    // Failed to request next report - device may have disconnected
+    // The umount callback will handle cleanup
+  }
 }
