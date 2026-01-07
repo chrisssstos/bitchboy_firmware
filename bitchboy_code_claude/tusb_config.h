@@ -1,7 +1,7 @@
 /*
  * TinyUSB Configuration for BitchBoy
  *
- * Composite USB Device: MIDI + HID Mouse
+ * Composite USB Device: MIDI + HID Mouse + HID Keyboard
  * USB Host via PIO: HID (Trackpad)
  */
 
