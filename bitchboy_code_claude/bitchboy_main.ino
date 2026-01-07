@@ -240,6 +240,18 @@ volatile bool pinchPending = false;
 volatile uint8_t pinchState = 0;  // 0=idle, 1=win_press, 2=win_release, 3=mac_press, 4=mac_release
 volatile unsigned long pinchStateTime = 0;
 
+// Flags for Core 0 to print status messages (avoids mutex deadlock)
+// See: https://github.com/adafruit/Adafruit_TinyUSB_Arduino/issues/238
+volatile bool flagCore1Ready = false;
+volatile bool flagTrackpadConnected = false;
+volatile bool flagTrackpadDisconnected = false;
+
+// Heartbeat to detect Core 1 freeze (known PIO-USB bug)
+// See: https://github.com/sekigon-gonnoc/Pico-PIO-USB/issues/192
+volatile unsigned long core1Heartbeat = 0;
+volatile bool core1Frozen = false;
+#define CORE1_TIMEOUT_MS 2000  // If no heartbeat for 2 seconds, Core 1 is frozen
+
 
 void setup() {
   // Set custom USB descriptors before anything else
@@ -306,6 +318,31 @@ void loop() {
 
   // Handle non-blocking pinch key sequence
   processPinchKeySequence();
+
+  // Print status messages from Core 1 (avoids mutex deadlock)
+  if (flagCore1Ready) {
+    flagCore1Ready = false;
+    Serial.println("USB Host ready on Core 1");
+  }
+  if (flagTrackpadConnected) {
+    flagTrackpadConnected = false;
+    Serial.println("Trackpad connected");
+    core1Frozen = false;  // Reset frozen flag on new connection
+  }
+  if (flagTrackpadDisconnected) {
+    flagTrackpadDisconnected = false;
+    Serial.println("Trackpad disconnected");
+  }
+
+  // Check for Core 1 freeze (known PIO-USB bug)
+  if (trackpadConnected && !core1Frozen) {
+    unsigned long now = millis();
+    if (now - core1Heartbeat > CORE1_TIMEOUT_MS) {
+      core1Frozen = true;
+      Serial.println("WARNING: Core 1 appears frozen (PIO-USB bug)");
+      Serial.println("Unplug and replug trackpad to recover");
+    }
+  }
 
   unsigned long currentTime = millis();
   if (inBatch && (currentTime - lastMessageTime > batchTimeout)) {
@@ -823,45 +860,39 @@ void setup1() {
   pio_cfg.pinout = PIO_USB_PINOUT_DMDP;
   USBHost.configure_pio_usb(1, &pio_cfg);
   USBHost.begin(1);
-  Serial.println("USB Host ready");
+
+  // Signal Core 0 instead of Serial.println (avoids potential mutex issues)
+  flagCore1Ready = true;
 }
 
 void loop1() {
   USBHost.task();
 
-  // Watchdog: check for stuck trackpad
-  if (trackpadConnected) {
-    unsigned long now = millis();
-    if (now - lastTrackpadActivity > TRACKPAD_WATCHDOG_TIMEOUT_MS) {
-      Serial.println("Trackpad watchdog timeout - no activity");
-      // Don't force reset, just log - user may just not be touching it
-      // But if we detect actual USB errors, we could add reset logic here
-      lastTrackpadActivity = now;  // Reset timer to avoid spam
-    }
-  }
+  // Update heartbeat so Core 0 knows we're alive
+  core1Heartbeat = millis();
 }
 
 // TinyUSB Host HID callbacks
+// CRITICAL: NO Serial.println() here! It causes mutex deadlock with Core 0 USB
+// See: https://github.com/adafruit/Adafruit_TinyUSB_Arduino/issues/238
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
-  Serial.println("Trackpad connected");
-
-  // Store device info for potential recovery
+  // NO Serial here - causes deadlock!
   trackpadDevAddr = dev_addr;
   trackpadInstance = instance;
   trackpadConnected = true;
   lastTrackpadActivity = millis();
+  flagTrackpadConnected = true;  // Signal Core 0 to print
 
   tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_REPORT);
-  if (!tuh_hid_receive_report(dev_addr, instance)) {
-    Serial.println("Warning: Failed to request initial report");
-  }
+  tuh_hid_receive_report(dev_addr, instance);
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-  Serial.println("Trackpad disconnected");
+  // NO Serial here - causes deadlock!
   trackpadConnected = false;
   trackpadDevAddr = 0;
   trackpadInstance = 0;
+  flagTrackpadDisconnected = true;  // Signal Core 0 to print
 }
 
 // Trigger pinch key sequence (non-blocking, processed on Core 0)
