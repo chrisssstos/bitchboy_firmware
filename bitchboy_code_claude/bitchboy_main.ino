@@ -235,6 +235,10 @@ volatile TrackpadReport reportQueue[TRACKPAD_REPORT_QUEUE_SIZE];
 volatile uint8_t queueWriteIdx = 0;
 volatile uint8_t queueReadIdx = 0;
 
+// Trackpad EMA smoothing (tune ALPHA: 0.0 = max smooth, 1.0 = no smoothing)
+const float TRACKPAD_ALPHA = 0.5;
+float smoothX = 0, smoothY = 0;
+
 // Pending keyboard report for pinch (non-blocking)
 volatile bool pinchPending = false;
 volatile uint8_t pinchState = 0;  // 0=idle, 1=win_press, 2=win_release, 3=mac_press, 4=mac_release
@@ -370,6 +374,15 @@ void processTrackpadQueue() {
       if (usb_hid.ready()) {
         uint8_t report[5];
         memcpy(report, (void*)reportQueue[idx].data, 5);
+
+        // EMA filter for smoother cursor movement
+        int8_t rawX = (int8_t)report[1];
+        int8_t rawY = (int8_t)report[2];
+        smoothX = TRACKPAD_ALPHA * rawX + (1.0f - TRACKPAD_ALPHA) * smoothX;
+        smoothY = TRACKPAD_ALPHA * rawY + (1.0f - TRACKPAD_ALPHA) * smoothY;
+        report[1] = (uint8_t)((int8_t)roundf(smoothX));
+        report[2] = (uint8_t)((int8_t)roundf(smoothY));
+
         usb_hid.sendReport(0, report, 5);
       }
       reportQueue[idx].valid = false;
