@@ -256,6 +256,11 @@ volatile unsigned long core1Heartbeat = 0;
 volatile bool core1Frozen = false;
 #define CORE1_TIMEOUT_MS 2000  // If no heartbeat for 2 seconds, Core 1 is frozen
 
+// USB device connection stability tracking
+bool usbWasMounted = false;
+unsigned long usbReconnectTime = 0;
+#define USB_SETTLE_MS 150  // Wait after reconnect before sending data
+
 
 void setup() {
   // Set custom USB descriptors before anything else
@@ -307,7 +312,33 @@ void setup() {
   Serial.println("Setup complete!");
 }
 
+// Returns true if the device-side USB is connected and settled
+bool usbDeviceReady() {
+  if (!TinyUSBDevice.mounted()) return false;
+  if (millis() - usbReconnectTime < USB_SETTLE_MS) return false;
+  return true;
+}
+
 void loop() {
+  // Track USB device mount/unmount transitions (cable wiggle recovery)
+  bool mounted = TinyUSBDevice.mounted();
+  if (mounted && !usbWasMounted) {
+    // Just reconnected — record time so we can let USB settle
+    usbReconnectTime = millis();
+    Serial.println("USB device reconnected, settling...");
+
+    // Flush stale trackpad queue
+    queueReadIdx = queueWriteIdx;
+
+    // Reset smoothing filters so we don't send stale deltas
+    smoothX = 0;
+    smoothY = 0;
+  }
+  if (!mounted && usbWasMounted) {
+    Serial.println("USB device disconnected");
+  }
+  usbWasMounted = mounted;
+
   // Handle keypad events
   handleKeypad();
 
@@ -363,11 +394,26 @@ void loop() {
     updateFlashingLEDs();
   }
 
-  keypadPixels.show();
+  // Throttle NeoPixel updates — bit-banging disables interrupts which can
+  // cause USB to miss SOF packets and drop the connection
+  static unsigned long lastPixelShow = 0;
+  if (currentTime - lastPixelShow >= 8) {  // ~120 Hz max
+    lastPixelShow = currentTime;
+    keypadPixels.show();
+  }
 }
 
 // Process trackpad reports from the queue (runs on Core 0)
 void processTrackpadQueue() {
+  if (!usbDeviceReady()) {
+    // Drain the queue silently when USB is disconnected/settling
+    while (queueReadIdx != queueWriteIdx) {
+      reportQueue[queueReadIdx].valid = false;
+      queueReadIdx = (queueReadIdx + 1) % TRACKPAD_REPORT_QUEUE_SIZE;
+    }
+    return;
+  }
+
   while (queueReadIdx != queueWriteIdx) {
     uint8_t idx = queueReadIdx;
     if (reportQueue[idx].valid) {
@@ -394,6 +440,7 @@ void processTrackpadQueue() {
 // Non-blocking pinch key sequence (runs on Core 0)
 void processPinchKeySequence() {
   if (!pinchPending) return;
+  if (!usbDeviceReady()) return;  // Don't send keys if USB isn't settled
 
   unsigned long now = millis();
   if (now - pinchStateTime < 10) return;  // 10ms between states
@@ -445,10 +492,10 @@ void handleKeypad() {
       int midiNote = padToNote[keyIndex];
 
       if (pressed) {
-        // Send Note On message with velocity 127
-        MIDI.sendNoteOn(midiNote, 127, MIDI_OUT_CH);
+        if (usbDeviceReady()) {
+          MIDI.sendNoteOn(midiNote, 127, MIDI_OUT_CH);
+        }
 
-        // Console log for button press
         Serial.print("Button pressed -> Row:");
         Serial.print(row);
         Serial.print(" Col:");
@@ -459,10 +506,10 @@ void handleKeypad() {
         Serial.print(midiNote);
         Serial.println(" ON");
       } else {
-        // Send Note Off message
-        MIDI.sendNoteOff(midiNote, 0, MIDI_OUT_CH);
+        if (usbDeviceReady()) {
+          MIDI.sendNoteOff(midiNote, 0, MIDI_OUT_CH);
+        }
 
-        // Console log for button release
         Serial.print("Button released -> Row:");
         Serial.print(row);
         Serial.print(" Col:");
@@ -577,7 +624,9 @@ void updatePotValues() {
         int value = readCalibratedSlider(channel);
 
         if (abs(value - previousSliderValues[channel]) >= 3) {
-          MIDI.sendControlChange(sliderNum - 1, value, MIDI_OUT_CH);
+          if (usbDeviceReady()) {
+            MIDI.sendControlChange(sliderNum - 1, value, MIDI_OUT_CH);
+          }
           previousSliderValues[channel] = value;
 
           // Console log for slider
@@ -600,7 +649,9 @@ void updatePotValues() {
         int value = readCalibratedPot(channel);
 
         if (abs(value - previousPotValues[channel]) >= 3) {
-          MIDI.sendControlChange(20 + potNum - 1, value, MIDI_OUT_CH);
+          if (usbDeviceReady()) {
+            MIDI.sendControlChange(20 + potNum - 1, value, MIDI_OUT_CH);
+          }
           previousPotValues[channel] = value;
 
           // Console log for pot
@@ -619,6 +670,7 @@ void updatePotValues() {
 }
 
 void readMIDI() {
+  if (!usbDeviceReady()) return;
   while (usb_midi.available()) {
     uint8_t statusByte = usb_midi.read();
     uint8_t dataByte1 = usb_midi.read();
