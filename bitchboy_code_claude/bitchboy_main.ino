@@ -269,7 +269,7 @@ void setup() {
   TinyUSBDevice.setSerialDescriptor("123456");
   Serial.begin(115200);  // Initialize Serial for debugging
   Wire.begin();
-  Wire.setClock(1000000); // Set I2C clock speed to 1MHz
+  Wire.setClock(400000); // TCA8418 max is 400kHz
 
   // Initialize USB HID for trackpad mouse output
   usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
