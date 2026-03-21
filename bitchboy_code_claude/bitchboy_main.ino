@@ -236,7 +236,7 @@ volatile uint8_t queueWriteIdx = 0;
 volatile uint8_t queueReadIdx = 0;
 
 // Trackpad EMA smoothing (tune ALPHA: 0.0 = max smooth, 1.0 = no smoothing)
-const float TRACKPAD_ALPHA = 0.5;
+const float TRACKPAD_ALPHA = 0.9;
 float smoothX = 0, smoothY = 0;
 
 // Pending keyboard report for pinch (non-blocking)
@@ -421,13 +421,18 @@ void processTrackpadQueue() {
         uint8_t report[5];
         memcpy(report, (void*)reportQueue[idx].data, 5);
 
-        // EMA filter for smoother cursor movement
+        // Scale + smooth cursor movement
         int8_t rawX = (int8_t)report[1];
         int8_t rawY = (int8_t)report[2];
-        smoothX = TRACKPAD_ALPHA * rawX + (1.0f - TRACKPAD_ALPHA) * smoothX;
-        smoothY = TRACKPAD_ALPHA * rawY + (1.0f - TRACKPAD_ALPHA) * smoothY;
-        report[1] = (uint8_t)((int8_t)roundf(smoothX));
-        report[2] = (uint8_t)((int8_t)roundf(smoothY));
+        float scaledX = rawX * 2.5f;
+        float scaledY = rawY * 2.5f;
+        smoothX = TRACKPAD_ALPHA * scaledX + (1.0f - TRACKPAD_ALPHA) * smoothX;
+        smoothY = TRACKPAD_ALPHA * scaledY + (1.0f - TRACKPAD_ALPHA) * smoothY;
+        // Clamp to int8 range
+        float outX = smoothX > 127 ? 127 : (smoothX < -127 ? -127 : smoothX);
+        float outY = smoothY > 127 ? 127 : (smoothY < -127 ? -127 : smoothY);
+        report[1] = (uint8_t)((int8_t)roundf(outX));
+        report[2] = (uint8_t)((int8_t)roundf(outY));
 
         usb_hid.sendReport(0, report, 5);
       }
