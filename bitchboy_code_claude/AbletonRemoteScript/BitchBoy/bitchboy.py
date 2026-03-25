@@ -25,7 +25,8 @@ Group tracks check child tracks for clip presence.
 from __future__ import absolute_import
 from _Framework.ControlSurface import ControlSurface
 from _Framework.ButtonElement import ButtonElement
-from _Framework.InputControlElement import MIDI_NOTE_TYPE
+from _Framework.InputControlElement import MIDI_NOTE_TYPE, MIDI_CC_TYPE
+from _Framework.SliderElement import SliderElement
 
 # ---------------------------------------------------------------------------
 # Pad-to-note table  (must match firmware padToNote[])
@@ -71,6 +72,11 @@ VEL_NAV_OFF   = 1    # dim gray      #1E1E1E (arrow at edge)
 MIDI_CH = 0  # channel 1
 MIDI_NOTE_ON  = 0x90 | MIDI_CH
 MIDI_NOTE_OFF = 0x80 | MIDI_CH
+
+# Vertical fader sliders: firmware sliderNums 5-12 -> CC 4-11
+FADER_CC_START = 4
+FADER_CC_END   = 11
+NUM_FADERS     = 8
 
 SLOT_LISTENERS = ("has_clip", "is_triggered", "playing_status", "is_playing")
 REFRESH_TICKS = 3
@@ -229,6 +235,7 @@ class BitchBoy(ControlSurface):
             self._color_cache = {}
             self._build_note_lookup()
             self._create_pad_buttons()
+            self._create_fader_sliders()
             self._attach_global_listeners()
             self._attach_slot_listeners()
             self.schedule_message(1, self._refresh_all)
@@ -240,6 +247,7 @@ class BitchBoy(ControlSurface):
         self._detach_slot_listeners()
         self._detach_global_listeners()
         self._all_leds_off()
+        self._destroy_fader_sliders()
         self._destroy_pad_buttons()
         self._set_session_highlight(-1, -1, -1, -1, False)
         self.log_message("BitchBoy: disconnected")
@@ -324,6 +332,40 @@ class BitchBoy(ControlSurface):
                     pass
         self._buttons = []
         self._pad_cbs = {}
+
+    # ------------------------------------------------------------------
+    # Fader sliders -> track volume
+    # ------------------------------------------------------------------
+    def _create_fader_sliders(self):
+        self._faders = []
+        self._fader_cbs = {}
+        for i in range(NUM_FADERS):
+            cc = FADER_CC_START + i
+            slider = SliderElement(MIDI_CC_TYPE, MIDI_CH, cc)
+            cb = lambda value, idx=i: self._on_fader_value(idx, value)
+            slider.add_value_listener(cb)
+            self._faders.append(slider)
+            self._fader_cbs[id(slider)] = cb
+
+    def _destroy_fader_sliders(self):
+        for slider in self._faders:
+            cb = self._fader_cbs.get(id(slider))
+            if cb:
+                try:
+                    slider.remove_value_listener(cb)
+                except RuntimeError:
+                    pass
+        self._faders = []
+        self._fader_cbs = {}
+
+    def _on_fader_value(self, fader_idx, value):
+        track_idx = fader_idx + self._track_offset
+        tracks = self.song().tracks
+        if track_idx >= len(tracks):
+            return
+        track = tracks[track_idx]
+        vol = track.mixer_device.volume
+        vol.value = vol.min + (vol.max - vol.min) * (value / 127.0)
 
     def _on_pad_value(self, row, col, value):
         if value <= 0:
