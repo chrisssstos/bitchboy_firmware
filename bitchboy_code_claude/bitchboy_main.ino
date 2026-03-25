@@ -34,7 +34,7 @@ tusb_desc_device_t custom_desc_device = {
 // Custom String Descriptors
 const char* custom_string_desc_arr[] = {
     (const char[]){0x09, 0x04},  // 0: Supported language is English
-    "BLOCK SYSTEM",                // 1: Manufacturer
+    "BLOCK SYSTEM Hardware",                // 1: Manufacturer
     "BitchBoy",                  // 2: Product name
     "123456",                    // 3: Serial number
 };
