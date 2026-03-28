@@ -67,7 +67,7 @@ VEL_PLAYING   = 21   # bright green  #00FF00
 VEL_TRIGGERED = 40   # FLASHING_VELOCITY (firmware blinks the LED)
 VEL_RECORDING = 5    # bright red    #FF0000
 VEL_GROUP     = 48   # purple        #874CFF (group track with clip)
-VEL_NAV_ON    = 3    # white         #FFFFFF (arrow can scroll)
+VEL_NAV_ON    = 9    # orange        #FF5400 (arrow can scroll)
 VEL_NAV_OFF   = 1    # dim gray      #1E1E1E (arrow at edge)
 
 MIDI_CH = 0  # channel 1
