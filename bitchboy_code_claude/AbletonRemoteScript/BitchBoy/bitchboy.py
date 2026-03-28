@@ -24,6 +24,7 @@ Group tracks check child tracks for clip presence.
 
 from __future__ import absolute_import
 from _Framework.ControlSurface import ControlSurface
+from _Framework.SessionComponent import SessionComponent
 from _Framework.ButtonElement import ButtonElement
 from _Framework.InputControlElement import MIDI_NOTE_TYPE, MIDI_CC_TYPE
 from _Framework.SliderElement import SliderElement
@@ -73,9 +74,9 @@ MIDI_CH = 0  # channel 1
 MIDI_NOTE_ON  = 0x90 | MIDI_CH
 MIDI_NOTE_OFF = 0x80 | MIDI_CH
 
-# Vertical fader sliders: firmware sliderNums 5-12 -> CC 4-11
-FADER_CC_START = 4
-FADER_CC_END   = 11
+# Vertical fader sliders: firmware sliderNums 1-8 -> CC 0-7
+FADER_CC_START = 0
+FADER_CC_END   = 7
 NUM_FADERS     = 8
 
 SLOT_LISTENERS = ("has_clip", "is_triggered", "playing_status", "is_playing")
@@ -233,6 +234,9 @@ class BitchBoy(ControlSurface):
             self._scene_offset = 0
             self._timer_active = False
             self._color_cache = {}
+            self._session = SessionComponent(SESSION_COLS, SESSION_ROWS)
+            self._session.set_offsets(0, 0)
+            self.set_highlighting_session_component(self._session)
             self._build_note_lookup()
             self._create_pad_buttons()
             self._create_fader_sliders()
@@ -249,7 +253,6 @@ class BitchBoy(ControlSurface):
         self._all_leds_off()
         self._destroy_fader_sliders()
         self._destroy_pad_buttons()
-        self._set_session_highlight(-1, -1, -1, -1, False)
         self.log_message("BitchBoy: disconnected")
         super(BitchBoy, self).disconnect()
 
@@ -446,6 +449,7 @@ class BitchBoy(ControlSurface):
         num_scenes = len(self.song().scenes)
         self._track_offset = min(self._track_offset, max(0, num_tracks - SESSION_COLS))
         self._scene_offset = min(self._scene_offset, max(0, num_scenes - SESSION_ROWS))
+        self._session.set_offsets(self._track_offset, self._scene_offset)
         self._attach_slot_listeners()
         self._refresh_all()
 
@@ -501,7 +505,7 @@ class BitchBoy(ControlSurface):
             if remover is not None:
                 try:
                     remover(cb)
-                except RuntimeError:
+                except (RuntimeError, TypeError, Exception):
                     pass
         self._slot_listeners = []
 
@@ -622,15 +626,7 @@ class BitchBoy(ControlSurface):
             self._send_led(note, 0)
 
     def _update_session_highlight(self):
-        num_tracks = len(self.song().tracks)
-        num_scenes = len(self.song().scenes)
-        width = min(SESSION_COLS, num_tracks - self._track_offset)
-        height = min(SESSION_ROWS, num_scenes - self._scene_offset)
-        if width > 0 and height > 0:
-            self._set_session_highlight(
-                self._track_offset, self._scene_offset,
-                width, height, False
-            )
+        self._session.set_offsets(self._track_offset, self._scene_offset)
 
     def _all_leds_off(self):
         for row in PAD_NOTES:
