@@ -4,7 +4,14 @@
 #include <CD74HC4067.h>
 #include <MIDI.h>
 #include <pio_usb.h>
+#include <EEPROM.h>
 #include "tusb.h"
+
+// Persistent settings (EEPROM emulation in flash)
+#define EEPROM_SIZE        16
+#define EEPROM_MAGIC_ADDR   0
+#define EEPROM_XYMODE_ADDR  1
+#define EEPROM_MAGIC      0xA5
 
 // USB Host pin for trackpad (D+ line)
 #define HOST_PIN_DP 1
@@ -244,6 +251,42 @@ volatile bool pinchPending = false;
 volatile uint8_t pinchState = 0;  // 0=idle, 1=win_press, 2=win_release, 3=mac_press, 4=mac_release
 volatile unsigned long pinchStateTime = 0;
 
+// Konami-style cheat code on the 3x3 grid (pixel indices).
+// Grid layout (pixel indices):
+//   40 41 42       Up is 41, Left=43, Center=44, Right=45, Down=47
+//   43 44 45       Corners: 40=Select, 42=B, 46=Start, 48=A
+//   46 47 48
+// Sequence: Up Up Down Down Left Right Left Right B A
+const int CHEAT_SEQ[] = {41, 41, 47, 47, 43, 45, 43, 45, 42, 48};
+const int CHEAT_SEQ_LEN = sizeof(CHEAT_SEQ) / sizeof(CHEAT_SEQ[0]);
+const unsigned long CHEAT_TIMEOUT_MS = 2000;
+int cheatProgress = 0;
+unsigned long cheatLastInputTime = 0;
+
+// XY pad mode (trackpad sends MIDI CCs instead of HID mouse reports)
+bool xyPadMode = false;
+float xyPadX = 63.5f;
+float xyPadY = 63.5f;
+int lastXyCC_X = -1;
+int lastXyCC_Y = -1;
+uint8_t lastXyButtons = 0;
+#define XY_CC_X       12
+#define XY_CC_Y       13
+#define XY_CC_BUTTON  14
+
+// Cheat flash feedback state
+unsigned long cheatFlashStart = 0;
+const unsigned long CHEAT_FLASH_DURATION_MS = 600;
+const int CHEAT_GRID_KEYIDX[9] = {40, 41, 42, 48, 49, 50, 56, 57, 58};
+
+// Deferred EEPROM save: flash erase stalls IRQs for ~10-20 ms, which can
+// starve PIO-USB on Core 1. Flag it here and commit from loop() when quiet,
+// but force the commit after SAVE_DEADLINE_MS so an unplug can't silently
+// lose the staged write.
+bool pendingEepromSave = false;
+unsigned long pendingEepromSaveTime = 0;
+const unsigned long SAVE_DEADLINE_MS = 1500;
+
 // Flags for Core 0 to print status messages (avoids mutex deadlock)
 // See: https://github.com/adafruit/Adafruit_TinyUSB_Arduino/issues/238
 volatile bool flagCore1Ready = false;
@@ -270,6 +313,12 @@ void setup() {
   Serial.begin(115200);  // Initialize Serial for debugging
   Wire.begin();
   Wire.setClock(400000); // TCA8418 max is 400kHz
+
+  // Restore persisted xyPadMode
+  EEPROM.begin(EEPROM_SIZE);
+  if (EEPROM.read(EEPROM_MAGIC_ADDR) == EEPROM_MAGIC) {
+    xyPadMode = EEPROM.read(EEPROM_XYMODE_ADDR) != 0;
+  }
 
   // Initialize USB HID for trackpad mouse output
   usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
@@ -336,6 +385,11 @@ void loop() {
   }
   if (!mounted && usbWasMounted) {
     Serial.println("USB device disconnected");
+    // Last chance to persist any staged settings before we lose power.
+    if (pendingEepromSave) {
+      EEPROM.commit();
+      pendingEepromSave = false;
+    }
   }
   usbWasMounted = mounted;
 
@@ -394,6 +448,9 @@ void loop() {
     updateFlashingLEDs();
   }
 
+  updateCheatFlash();
+  maybeCommitEeprom();
+
   // Throttle NeoPixel updates — bit-banging disables interrupts which can
   // cause USB to miss SOF packets and drop the connection
   static unsigned long lastPixelShow = 0;
@@ -434,7 +491,32 @@ void processTrackpadQueue() {
         report[1] = (uint8_t)((int8_t)roundf(outX));
         report[2] = (uint8_t)((int8_t)roundf(outY));
 
-        usb_hid.sendReport(0, report, 5);
+        if (xyPadMode) {
+          xyPadX += outX / 8.0f;
+          xyPadY += outY / 8.0f;
+          if (xyPadX < 0) xyPadX = 0;
+          if (xyPadX > 127) xyPadX = 127;
+          if (xyPadY < 0) xyPadY = 0;
+          if (xyPadY > 127) xyPadY = 127;
+
+          int ccX = (int)xyPadX;
+          int ccY = (int)xyPadY;
+          if (ccX != lastXyCC_X) {
+            MIDI.sendControlChange(XY_CC_X, ccX, MIDI_OUT_CH);
+            lastXyCC_X = ccX;
+          }
+          if (ccY != lastXyCC_Y) {
+            MIDI.sendControlChange(XY_CC_Y, ccY, MIDI_OUT_CH);
+            lastXyCC_Y = ccY;
+          }
+          uint8_t buttons = report[0] & 0x07;
+          if (buttons != lastXyButtons) {
+            MIDI.sendControlChange(XY_CC_BUTTON, buttons ? 127 : 0, MIDI_OUT_CH);
+            lastXyButtons = buttons;
+          }
+        } else {
+          usb_hid.sendReport(0, report, 5);
+        }
       }
       reportQueue[idx].valid = false;
     }
@@ -483,6 +565,89 @@ void processPinchKeySequence() {
   }
 }
 
+void processCheatCode(int pixel) {
+  if (pixel < 40 || pixel > 48) return;
+
+  unsigned long now = millis();
+  if (cheatProgress > 0 && now - cheatLastInputTime > CHEAT_TIMEOUT_MS) {
+    cheatProgress = 0;
+  }
+  cheatLastInputTime = now;
+
+  if (pixel == CHEAT_SEQ[cheatProgress]) {
+    cheatProgress++;
+    if (cheatProgress >= CHEAT_SEQ_LEN) {
+      cheatProgress = 0;
+      xyPadMode = !xyPadMode;
+      xyPadX = 63.5f;
+      xyPadY = 63.5f;
+      lastXyCC_X = -1;
+      lastXyCC_Y = -1;
+      lastXyButtons = 0;
+      cheatFlashStart = millis();
+      EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+      EEPROM.write(EEPROM_XYMODE_ADDR, xyPadMode ? 1 : 0);
+      pendingEepromSave = true;
+      pendingEepromSaveTime = millis();
+      Serial.print("Cheat code! xyPadMode = ");
+      Serial.println(xyPadMode ? "ON" : "OFF");
+    }
+  } else if (pixel == CHEAT_SEQ[0]) {
+    cheatProgress = 1;
+  } else {
+    cheatProgress = 0;
+  }
+}
+
+// Commit EEPROM only when it's safe: flash is finished, trackpad queue drained.
+// The erase stalls interrupts for ~10-20 ms and can glitch PIO-USB otherwise.
+void maybeCommitEeprom() {
+  if (!pendingEepromSave) return;
+
+  unsigned long now = millis();
+  bool deadline = (now - pendingEepromSaveTime) >= SAVE_DEADLINE_MS;
+
+  if (!deadline) {
+    if (cheatFlashStart != 0) return;                  // flash still running
+    if (queueReadIdx != queueWriteIdx) return;         // trackpad reports pending
+    if (now - lastTrackpadActivity < 50) return;       // recent trackpad traffic
+  }
+
+  EEPROM.commit();
+  pendingEepromSave = false;
+  Serial.println(deadline ? "EEPROM committed (deadline)" : "EEPROM committed");
+}
+
+void updateCheatFlash() {
+  if (cheatFlashStart == 0) return;
+
+  unsigned long elapsed = millis() - cheatFlashStart;
+  if (elapsed >= CHEAT_FLASH_DURATION_MS) {
+    for (int i = 0; i < 9; i++) {
+      int keyIndex = CHEAT_GRID_KEYIDX[i];
+      int pixel = padToPixel[keyIndex];
+      int midiNote = padToNote[keyIndex];
+      if (pixel >= 0 && midiNote >= 0) {
+        keypadPixels.setPixelColor(pixel, velocityToColor(velocities[midiNote]));
+      }
+    }
+    cheatFlashStart = 0;
+    return;
+  }
+
+  bool on = (elapsed / 75) % 2 == 0;
+  uint32_t color = on
+    ? (xyPadMode ? keypadPixels.Color(0x00, 0x55, 0xFF)   // blue = XY pad
+                 : keypadPixels.Color(0xD6, 0x35, 0x00))  // orange = trackpad
+    : keypadPixels.Color(0xFF, 0xFF, 0xFF);                // white
+  for (int i = 0; i < 9; i++) {
+    int pixel = padToPixel[CHEAT_GRID_KEYIDX[i]];
+    if (pixel >= 0) {
+      keypadPixels.setPixelColor(pixel, color);
+    }
+  }
+}
+
 void handleKeypad() {
   if (tca8418.available() > 0) {
     int k = tca8418.getEvent();
@@ -497,6 +662,8 @@ void handleKeypad() {
       int midiNote = padToNote[keyIndex];
 
       if (pressed) {
+        processCheatCode(padToPixel[keyIndex]);
+
         if (usbDeviceReady()) {
           MIDI.sendNoteOn(midiNote, 127, MIDI_OUT_CH);
         }
