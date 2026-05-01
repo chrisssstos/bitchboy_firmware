@@ -19,6 +19,8 @@
 // Trackpad robustness settings
 #define TRACKPAD_WATCHDOG_TIMEOUT_MS 5000  // Reset USB if no activity for 5s when connected
 #define TRACKPAD_REPORT_QUEUE_SIZE 8       // Buffer for report queue between cores
+#define ADC_OUTLIER_THRESHOLD 100          // Reject raw reads this far from smoothed (kills USB-correlated power-rail transients)
+#define ADC_MAX_REJECTS 3                  // After this many consecutive rejections, accept (real fast motion escape hatch)
 
 // Custom USB Device Descriptor
 tusb_desc_device_t custom_desc_device = {
@@ -170,6 +172,14 @@ int previousPotValues[NUM_POTS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 // Reversing direction requires a delta of 2 to commit, killing ADC oscillation jitter.
 int lastSliderDirection[NUM_SLIDERS] = {0,0,0,0,0,0,0,0,0,0,0,0};
 int lastPotDirection[NUM_POTS] = {0,0,0,0,0,0,0,0};
+
+// Outlier rejection counters per channel. USB-correlated power-rail transients
+// produce 300+ LSB unidirectional jumps in raw that fool every other filter
+// because all samples in a burst are uniformly shifted. Reject reads that
+// differ from smoothed by more than ADC_OUTLIER_THRESHOLD; bounded by
+// ADC_MAX_REJECTS so a real fast slider move still passes through.
+int sliderRawRejects[NUM_SLIDERS] = {0,0,0,0,0,0,0,0,0,0,0,0};
+int potRawRejects[NUM_POTS] = {0,0,0,0,0,0,0,0};
 
 // Smoothed values for noise reduction
 float smoothedSliderValues[NUM_SLIDERS] = {0,0,0,0,0,0,0,0,0,0,0,0};
@@ -717,15 +727,15 @@ int findChannelForPot(int potNum) {
 
 // CC bins are 10 internal units wide. Require this many extra units past
 // the bin boundary before flipping CC. Absorbs residual smoothed-value
-// jitter (e.g. EMI coupling at mid-slider where source impedance peaks).
-// Larger CC moves (>=3) bypass hysteresis so real movement is unaffected.
-#define CC_BOUNDARY_HYST 8
+// jitter at the quantization step. Larger CC moves (>=2) bypass hysteresis
+// so real movement is unaffected.
+#define CC_BOUNDARY_HYST 4
 
 // Quantize a 0..1270 internal value to a 0..127 CC, with sticky boundaries
 // against prevCC. prevCC < 0 means uninitialized — take whatever rounds.
 static inline int quantizeWithHysteresis(int internal, int prevCC) {
   int candidate = (internal + 5) / 10;
-  if (prevCC < 0 || abs(candidate - prevCC) >= 3) return candidate;
+  if (prevCC < 0 || abs(candidate - prevCC) >= 2) return candidate;
   if (candidate == prevCC) return prevCC;
   if (candidate > prevCC) {
     int upperEdge = prevCC * 10 + 5 + CC_BOUNDARY_HYST;
@@ -735,19 +745,47 @@ static inline int quantizeWithHysteresis(int internal, int prevCC) {
   return (internal < lowerEdge) ? candidate : prevCC;
 }
 
+// Read 10 samples, sort, return trimmed mean (drop 2 lowest + 2 highest,
+// average the middle 6). Rejects EMI-burst outliers without averaging
+// them in like a plain mean would.
+static inline int readBurstTrimmedMean(int adcPin) {
+  int samples[10];
+  for (int i = 0; i < 10; i++) {
+    samples[i] = analogRead(adcPin);
+    delayMicroseconds(10);
+  }
+  for (int i = 1; i < 10; i++) {
+    int key = samples[i];
+    int j = i - 1;
+    while (j >= 0 && samples[j] > key) {
+      samples[j + 1] = samples[j];
+      j--;
+    }
+    samples[j + 1] = key;
+  }
+  long sum = 0;
+  for (int i = 2; i < 8; i++) sum += samples[i];
+  return (int)(sum / 6);
+}
+
 int readCalibratedSlider(int channel, int prevCC) {
   mux.channel(channel);
   delayMicroseconds(100);
 
-  long sum = 0;
-  for (int i = 0; i < 10; i++) {
-    sum += analogRead(SLIDERS_PIN);
-    delayMicroseconds(10);
-  }
-  int rawValue = sum / 10;
+  int rawValue = readBurstTrimmedMean(SLIDERS_PIN);
 
-  if (smoothedSliderValues[channel] == 0) smoothedSliderValues[channel] = rawValue;
-  smoothedSliderValues[channel] = (smoothedSliderValues[channel] * 0.9) + (rawValue * 0.1);
+  if (smoothedSliderValues[channel] == 0) {
+    smoothedSliderValues[channel] = rawValue;
+  } else {
+    int rawDelta = abs(rawValue - (int)smoothedSliderValues[channel]);
+    if (rawDelta > ADC_OUTLIER_THRESHOLD && sliderRawRejects[channel] < ADC_MAX_REJECTS) {
+      sliderRawRejects[channel]++;
+      // Drop this sample on the floor; smoothed unchanged.
+    } else {
+      sliderRawRejects[channel] = 0;
+      smoothedSliderValues[channel] = (smoothedSliderValues[channel] * 0.6) + (rawValue * 0.4);
+    }
+  }
 
   int internal = map((int)smoothedSliderValues[channel], sliderMinValues[channel], sliderMaxValues[channel], 0, 1270);
   int cc = quantizeWithHysteresis(internal, prevCC);
@@ -762,15 +800,19 @@ int readCalibratedPot(int channel, int prevCC) {
   mux.channel(channel);
   delayMicroseconds(100);
 
-  long sum = 0;
-  for (int i = 0; i < 10; i++) {
-    sum += analogRead(POTS_PIN);
-    delayMicroseconds(10);
-  }
-  int rawValue = sum / 10;
+  int rawValue = readBurstTrimmedMean(POTS_PIN);
 
-  if (smoothedPotValues[channel] == 0) smoothedPotValues[channel] = rawValue;
-  smoothedPotValues[channel] = (smoothedPotValues[channel] * 0.9) + (rawValue * 0.1);
+  if (smoothedPotValues[channel] == 0) {
+    smoothedPotValues[channel] = rawValue;
+  } else {
+    int rawDelta = abs(rawValue - (int)smoothedPotValues[channel]);
+    if (rawDelta > ADC_OUTLIER_THRESHOLD && potRawRejects[channel] < ADC_MAX_REJECTS) {
+      potRawRejects[channel]++;
+    } else {
+      potRawRejects[channel] = 0;
+      smoothedPotValues[channel] = (smoothedPotValues[channel] * 0.6) + (rawValue * 0.4);
+    }
+  }
 
   int internal = map((int)smoothedPotValues[channel], potMinValues[channel], potMaxValues[channel], 0, 1270);
   int cc = quantizeWithHysteresis(internal, prevCC);
