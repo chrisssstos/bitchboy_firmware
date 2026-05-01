@@ -715,7 +715,27 @@ int findChannelForPot(int potNum) {
   return -1;
 }
 
-int readCalibratedSlider(int channel) {
+// CC bins are 10 internal units wide. Require this many extra units past
+// the bin boundary before flipping CC. Absorbs residual smoothed-value
+// jitter (e.g. EMI coupling at mid-slider where source impedance peaks).
+// Larger CC moves (>=3) bypass hysteresis so real movement is unaffected.
+#define CC_BOUNDARY_HYST 8
+
+// Quantize a 0..1270 internal value to a 0..127 CC, with sticky boundaries
+// against prevCC. prevCC < 0 means uninitialized — take whatever rounds.
+static inline int quantizeWithHysteresis(int internal, int prevCC) {
+  int candidate = (internal + 5) / 10;
+  if (prevCC < 0 || abs(candidate - prevCC) >= 3) return candidate;
+  if (candidate == prevCC) return prevCC;
+  if (candidate > prevCC) {
+    int upperEdge = prevCC * 10 + 5 + CC_BOUNDARY_HYST;
+    return (internal >= upperEdge) ? candidate : prevCC;
+  }
+  int lowerEdge = prevCC * 10 - 5 - CC_BOUNDARY_HYST;
+  return (internal < lowerEdge) ? candidate : prevCC;
+}
+
+int readCalibratedSlider(int channel, int prevCC) {
   mux.channel(channel);
   delayMicroseconds(100);
 
@@ -727,32 +747,18 @@ int readCalibratedSlider(int channel) {
   int rawValue = sum / 10;
 
   if (smoothedSliderValues[channel] == 0) smoothedSliderValues[channel] = rawValue;
-  smoothedSliderValues[channel] = (smoothedSliderValues[channel] * 0.6) + (rawValue * 0.4);
+  smoothedSliderValues[channel] = (smoothedSliderValues[channel] * 0.9) + (rawValue * 0.1);
 
-  int calibratedValue = map((int)smoothedSliderValues[channel], sliderMinValues[channel], sliderMaxValues[channel], 0, 1270);
-  calibratedValue = (calibratedValue + 5) / 10;
+  int internal = map((int)smoothedSliderValues[channel], sliderMinValues[channel], sliderMaxValues[channel], 0, 1270);
+  int cc = quantizeWithHysteresis(internal, prevCC);
 
-  // Snap to endpoints
-  if (calibratedValue <= 2) {
-    calibratedValue = 0;
-  } else if (calibratedValue >= 125) {
-    calibratedValue = 127;
-  }
+  if (cc <= 2) cc = 0;
+  else if (cc >= 125) cc = 127;
 
-  // Uncomment below for verbose debugging of raw ADC values
-  // Serial.print("Slider CH");
-  // Serial.print(channel);
-  // Serial.print(" RAW:");
-  // Serial.print(rawValue);
-  // Serial.print(" SMOOTHED:");
-  // Serial.print((int)smoothedSliderValues[channel]);
-  // Serial.print(" CALIBRATED:");
-  // Serial.println(calibratedValue);
-
-  return constrain(calibratedValue, 0, 127);
+  return constrain(cc, 0, 127);
 }
 
-int readCalibratedPot(int channel) {
+int readCalibratedPot(int channel, int prevCC) {
   mux.channel(channel);
   delayMicroseconds(100);
 
@@ -764,29 +770,15 @@ int readCalibratedPot(int channel) {
   int rawValue = sum / 10;
 
   if (smoothedPotValues[channel] == 0) smoothedPotValues[channel] = rawValue;
-  smoothedPotValues[channel] = (smoothedPotValues[channel] * 0.6) + (rawValue * 0.4);
+  smoothedPotValues[channel] = (smoothedPotValues[channel] * 0.9) + (rawValue * 0.1);
 
-  int calibratedValue = map((int)smoothedPotValues[channel], potMinValues[channel], potMaxValues[channel], 0, 1270);
-  calibratedValue = (calibratedValue + 5) / 10;
+  int internal = map((int)smoothedPotValues[channel], potMinValues[channel], potMaxValues[channel], 0, 1270);
+  int cc = quantizeWithHysteresis(internal, prevCC);
 
-  // Snap to endpoints
-  if (calibratedValue <= 2) {
-    calibratedValue = 0;
-  } else if (calibratedValue >= 125) {
-    calibratedValue = 127;
-  }
+  if (cc <= 2) cc = 0;
+  else if (cc >= 125) cc = 127;
 
-  // Uncomment below for verbose debugging of raw ADC values
-  // Serial.print("Pot CH");
-  // Serial.print(channel);
-  // Serial.print(" RAW:");
-  // Serial.print(rawValue);
-  // Serial.print(" SMOOTHED:");
-  // Serial.print((int)smoothedPotValues[channel]);
-  // Serial.print(" CALIBRATED:");
-  // Serial.println(calibratedValue);
-
-  return constrain(calibratedValue, 0, 127);
+  return constrain(cc, 0, 127);
 }
 
 void updatePotValues() {
@@ -798,7 +790,7 @@ void updatePotValues() {
     for (int sliderNum = 1; sliderNum <= NUM_SLIDERS; sliderNum++) {
       int channel = findChannelForSlider(sliderNum);
       if (channel >= 0) {
-        int value = readCalibratedSlider(channel);
+        int value = readCalibratedSlider(channel, previousSliderValues[channel]);
 
         int sDelta = value - previousSliderValues[channel];
         int sDeadband = (sDelta * lastSliderDirection[channel] >= 0) ? 1 : 2;
@@ -827,7 +819,7 @@ void updatePotValues() {
     for (int potNum = 1; potNum <= NUM_POTS; potNum++) {
       int channel = findChannelForPot(potNum);
       if (channel >= 0) {
-        int value = readCalibratedPot(channel);
+        int value = readCalibratedPot(channel, previousPotValues[channel]);
 
         int pDelta = value - previousPotValues[channel];
         int pDeadband = (pDelta * lastPotDirection[channel] >= 0) ? 1 : 2;
