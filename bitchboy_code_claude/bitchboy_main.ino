@@ -157,14 +157,19 @@ const int sliderMap[NUM_SLIDERS] = {12, 11, 10, 9, 8, 7, 6, 5, 1, 2, 3, 4};
 const int potMap[NUM_POTS] = {2, 4, 6, 8, 1, 3, 5, 7};
 
 // Calibrated values
-int sliderMinValues[NUM_SLIDERS] = {375, 369, 396, 374, 385, 366, 380, 358, 377, 375, 362, 375};
-int sliderMaxValues[NUM_SLIDERS] = {4095, 4095, 4094, 4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
+int sliderMinValues[NUM_SLIDERS] = {384, 393, 348, 348, 423, 375, 352, 389, 391, 355, 341, 421};
+int sliderMaxValues[NUM_SLIDERS] = {4004, 3857, 4095, 4084, 3905, 3954, 4095, 3973, 3845, 4095, 4081, 3902};
 
 int potMinValues[NUM_POTS] = {355, 352, 377, 379, 369, 390, 383, 384};
 int potMaxValues[NUM_POTS] = {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
 
 int previousSliderValues[NUM_SLIDERS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 int previousPotValues[NUM_POTS] = {-1, -1, -1, -1, -1, -1, -1, -1};
+
+// Last movement direction per channel (-1, 0, +1) for direction-aware hysteresis.
+// Reversing direction requires a delta of 2 to commit, killing ADC oscillation jitter.
+int lastSliderDirection[NUM_SLIDERS] = {0,0,0,0,0,0,0,0,0,0,0,0};
+int lastPotDirection[NUM_POTS] = {0,0,0,0,0,0,0,0};
 
 // Smoothed values for noise reduction
 float smoothedSliderValues[NUM_SLIDERS] = {0,0,0,0,0,0,0,0,0,0,0,0};
@@ -795,11 +800,15 @@ void updatePotValues() {
       if (channel >= 0) {
         int value = readCalibratedSlider(channel);
 
-        if (abs(value - previousSliderValues[channel]) >= 3) {
+        int sDelta = value - previousSliderValues[channel];
+        int sDeadband = (sDelta * lastSliderDirection[channel] >= 0) ? 1 : 2;
+        if (previousSliderValues[channel] < 0 || abs(sDelta) >= sDeadband) {
           if (usbDeviceReady()) {
             MIDI.sendControlChange(sliderNum - 1, value, MIDI_OUT_CH);
           }
           previousSliderValues[channel] = value;
+          if (sDelta > 0) lastSliderDirection[channel] = 1;
+          else if (sDelta < 0) lastSliderDirection[channel] = -1;
 
           // Console log for slider
           Serial.print("Slider #");
@@ -820,11 +829,15 @@ void updatePotValues() {
       if (channel >= 0) {
         int value = readCalibratedPot(channel);
 
-        if (abs(value - previousPotValues[channel]) >= 3) {
+        int pDelta = value - previousPotValues[channel];
+        int pDeadband = (pDelta * lastPotDirection[channel] >= 0) ? 1 : 2;
+        if (previousPotValues[channel] < 0 || abs(pDelta) >= pDeadband) {
           if (usbDeviceReady()) {
             MIDI.sendControlChange(20 + potNum - 1, value, MIDI_OUT_CH);
           }
           previousPotValues[channel] = value;
+          if (pDelta > 0) lastPotDirection[channel] = 1;
+          else if (pDelta < 0) lastPotDirection[channel] = -1;
 
           // Console log for pot
           Serial.print("Pot #");
