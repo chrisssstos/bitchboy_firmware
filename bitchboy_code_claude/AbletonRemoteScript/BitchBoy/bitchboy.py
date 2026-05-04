@@ -20,6 +20,8 @@ Grid layout:
 Session highlight rectangle is shown in Ableton's Session View.
 A periodic refresh timer ensures LEDs stay in sync after clip stops.
 Group tracks check child tracks for clip presence.
+The grid follows song.visible_tracks so collapsing a group hides its
+children on the controller, mirroring what's shown in Session View.
 """
 
 from __future__ import absolute_import
@@ -363,7 +365,7 @@ class BitchBoy(ControlSurface):
 
     def _on_fader_value(self, fader_idx, value):
         track_idx = fader_idx + self._track_offset
-        tracks = self.song().tracks
+        tracks = self.song().visible_tracks
         if track_idx >= len(tracks):
             return
         track = tracks[track_idx]
@@ -383,7 +385,7 @@ class BitchBoy(ControlSurface):
     # D-pad navigation
     # ------------------------------------------------------------------
     def _navigate(self, note):
-        num_tracks = len(self.song().tracks)
+        num_tracks = len(self.song().visible_tracks)
         num_scenes = len(self.song().scenes)
         moved = False
 
@@ -411,14 +413,16 @@ class BitchBoy(ControlSurface):
     def _fire_clip(self, row, col):
         scene_idx = row + self._scene_offset
         track_idx = col + self._track_offset
-        tracks = self.song().tracks
+        visible = self.song().visible_tracks
         scenes = self.song().scenes
-        if scene_idx >= len(scenes) or track_idx >= len(tracks):
+        if scene_idx >= len(scenes) or track_idx >= len(visible):
             return
-        track = tracks[track_idx]
+        track = visible[track_idx]
         if track.is_foldable:
-            # Fire only child tracks in this group for this scene
-            for t in tracks:
+            # Fire all child tracks in this group for this scene
+            # (children may be hidden when the group is collapsed,
+            #  so iterate the full track list, not visible only).
+            for t in self.song().tracks:
                 try:
                     if t.group_track == track:
                         t.clip_slots[scene_idx].fire()
@@ -434,10 +438,21 @@ class BitchBoy(ControlSurface):
     def _attach_global_listeners(self):
         self.song().add_tracks_listener(self._on_list_changed)
         self.song().add_scenes_listener(self._on_list_changed)
+        # visible_tracks changes when a group is collapsed/expanded
+        try:
+            self.song().add_visible_tracks_listener(self._on_list_changed)
+        except (AttributeError, RuntimeError):
+            pass
 
     def _detach_global_listeners(self):
-        for fn in (self.song().remove_tracks_listener,
-                   self.song().remove_scenes_listener):
+        removers = [
+            self.song().remove_tracks_listener,
+            self.song().remove_scenes_listener,
+        ]
+        rm_visible = getattr(self.song(), "remove_visible_tracks_listener", None)
+        if rm_visible is not None:
+            removers.append(rm_visible)
+        for fn in removers:
             try:
                 fn(self._on_list_changed)
             except RuntimeError:
@@ -445,7 +460,7 @@ class BitchBoy(ControlSurface):
 
     def _on_list_changed(self):
         self._detach_slot_listeners()
-        num_tracks = len(self.song().tracks)
+        num_tracks = len(self.song().visible_tracks)
         num_scenes = len(self.song().scenes)
         self._track_offset = min(self._track_offset, max(0, num_tracks - SESSION_COLS))
         self._scene_offset = min(self._scene_offset, max(0, num_scenes - SESSION_ROWS))
@@ -457,8 +472,9 @@ class BitchBoy(ControlSurface):
     # Per-slot listeners
     # ------------------------------------------------------------------
     def _attach_slot_listeners(self):
-        tracks = self.song().tracks
-        num_tracks = len(tracks)
+        visible = self.song().visible_tracks
+        all_tracks = self.song().tracks
+        num_tracks = len(visible)
         num_scenes = len(self.song().scenes)
 
         for row in range(SESSION_ROWS):
@@ -471,7 +487,7 @@ class BitchBoy(ControlSurface):
                     continue
                 if PAD_NOTES[row][col] < 0:
                     continue
-                track = tracks[track_idx]
+                track = visible[track_idx]
                 slot = track.clip_slots[scene_idx]
                 cb = lambda r=row, c=col: self._on_slot_changed(r, c)
                 for prop in SLOT_LISTENERS:
@@ -483,8 +499,9 @@ class BitchBoy(ControlSurface):
                         except RuntimeError:
                             pass
                 # For group tracks, also listen on child track slots
+                # (children may be hidden when collapsed, so use full track list).
                 if track.is_foldable:
-                    for t in tracks:
+                    for t in all_tracks:
                         try:
                             if t.group_track == track:
                                 child_slot = t.clip_slots[scene_idx]
@@ -515,15 +532,16 @@ class BitchBoy(ControlSurface):
     def _velocity_for(self, row, col):
         scene_idx = row + self._scene_offset
         track_idx = col + self._track_offset
-        tracks = self.song().tracks
+        visible = self.song().visible_tracks
         scenes = self.song().scenes
-        if scene_idx >= len(scenes) or track_idx >= len(tracks):
+        if scene_idx >= len(scenes) or track_idx >= len(visible):
             return 0
-        track = tracks[track_idx]
+        track = visible[track_idx]
 
-        # Group tracks: check child tracks for clip state
+        # Group tracks: aggregate state from children (use full track list,
+        # since children may be hidden when the group is collapsed).
         if track.is_foldable:
-            return self._group_velocity(track, scene_idx, tracks)
+            return self._group_velocity(track, scene_idx, self.song().tracks)
 
         # Normal track
         slot = track.clip_slots[scene_idx]
@@ -545,28 +563,36 @@ class BitchBoy(ControlSurface):
         return VEL_GROUP  # fallback
 
     def _group_velocity(self, group_track, scene_idx, tracks):
-        """Determine velocity for a group track by checking its children."""
+        """Determine velocity for a group track by checking its children.
+        Uses the first child clip's colour so the group LED matches what
+        Ableton shows in the session view (instead of always purple)."""
         has_triggered = False
         has_playing = False
-        has_clip = False
+        child_color = None
         for t in tracks:
             try:
                 if t.group_track == group_track:
                     slot = t.clip_slots[scene_idx]
                     if slot.has_clip:
-                        has_clip = True
                         if slot.is_triggered:
                             has_triggered = True
                         if slot.is_playing:
                             has_playing = True
+                        if child_color is None:
+                            clip = slot.clip
+                            if clip is not None:
+                                try:
+                                    child_color = clip.color
+                                except (AttributeError, RuntimeError):
+                                    pass
             except (AttributeError, IndexError):
                 continue
         if has_triggered:
             return VEL_TRIGGERED
         if has_playing:
             return VEL_PLAYING
-        if has_clip:
-            return VEL_GROUP
+        if child_color is not None:
+            return self._color_to_velocity(child_color)
         return 0
 
     # ------------------------------------------------------------------
@@ -608,7 +634,7 @@ class BitchBoy(ControlSurface):
         self._update_session_highlight()
 
     def _update_nav_leds(self):
-        num_tracks = len(self.song().tracks)
+        num_tracks = len(self.song().visible_tracks)
         num_scenes = len(self.song().scenes)
 
         can_up    = self._scene_offset > 0
