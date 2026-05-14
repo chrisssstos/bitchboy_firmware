@@ -508,7 +508,7 @@ void processTrackpadQueue() {
 
         if (xyPadMode) {
           xyPadX += outX / 8.0f;
-          xyPadY += outY / 8.0f;
+          xyPadY -= outY / 8.0f;  // invert: trackpad +Y is down, XY pad +Y is up
           if (xyPadX < 0) xyPadX = 0;
           if (xyPadX > 127) xyPadX = 127;
           if (xyPadY < 0) xyPadY = 0;
