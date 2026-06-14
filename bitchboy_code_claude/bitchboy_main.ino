@@ -8,10 +8,24 @@
 #include "tusb.h"
 
 // Persistent settings (EEPROM emulation in flash)
-#define EEPROM_SIZE        16
+#define EEPROM_SIZE        128
 #define EEPROM_MAGIC_ADDR   0
 #define EEPROM_XYMODE_ADDR  1
 #define EEPROM_MAGIC      0xA5
+
+// Calibration block: lives alongside the settings above in the same EEPROM
+// sector. Layout: magic, version, then 40 little-endian uint16s
+// (12 slider mins, 12 slider maxes, 8 pot mins, 8 pot maxes), then an
+// XOR checksum of the 80 data bytes. The UF2 bootloader never erases this
+// sector, so calibration survives firmware updates.
+#define EEPROM_CAL_MAGIC_ADDR  2
+#define EEPROM_CAL_VER_ADDR    3
+#define EEPROM_CAL_DATA_ADDR   4
+#define EEPROM_CAL_MAGIC     0xC5
+#define EEPROM_CAL_VERSION   1
+#define CAL_NUM_VALUES (NUM_SLIDERS * 2 + NUM_POTS * 2)
+#define EEPROM_CAL_CHECKSUM_ADDR (EEPROM_CAL_DATA_ADDR + CAL_NUM_VALUES * 2)
+#define CAL_CHECKSUM_SEED 0x5A
 
 // USB Host pin for trackpad (D+ line)
 #define HOST_PIN_DP 1
@@ -158,7 +172,8 @@ CD74HC4067 mux(22, 21, 19, 20);
 const int sliderMap[NUM_SLIDERS] = {12, 11, 10, 9, 8, 7, 6, 5, 1, 2, 3, 4};
 const int potMap[NUM_POTS] = {2, 4, 6, 8, 1, 3, 5, 7};
 
-// Calibrated values
+// Calibration defaults — overridden at boot by per-unit values stored in
+// EEPROM (see loadCalibrationFromEeprom / on-device calibration mode)
 int sliderMinValues[NUM_SLIDERS] = {384, 393, 348, 348, 423, 375, 352, 389, 391, 355, 341, 421};
 int sliderMaxValues[NUM_SLIDERS] = {4004, 3857, 4095, 4084, 3905, 3954, 4095, 3973, 3845, 4095, 4081, 3902};
 
@@ -294,6 +309,31 @@ unsigned long cheatFlashStart = 0;
 const unsigned long CHEAT_FLASH_DURATION_MS = 600;
 const int CHEAT_GRID_KEYIDX[9] = {40, 41, 42, 48, 49, 50, 56, 57, 58};
 
+// On-device calibration mode. Entered by circling the 3x3 grid corners
+// clockwise twice: Select(40) B(42) A(48) Start(46), repeated.
+// While active: normal MIDI output is suppressed, the user sweeps every
+// slider/pot through its full travel, per-channel LEDs go green once a
+// healthy span has been seen, then A(48) saves to EEPROM and B(42) cancels.
+// Defaults compiled into the firmware are only used when EEPROM holds no
+// valid calibration, so one universal .uf2 works on every unit.
+const int CAL_SEQ[] = {40, 42, 48, 46, 40, 42, 48, 46};
+const int CAL_SEQ_LEN = sizeof(CAL_SEQ) / sizeof(CAL_SEQ[0]);
+int calSeqProgress = 0;
+unsigned long calSeqLastInputTime = 0;
+
+bool calMode = false;
+int calMinSlider[NUM_SLIDERS], calMaxSlider[NUM_SLIDERS];
+int calMinPot[NUM_POTS], calMaxPot[NUM_POTS];
+#define CAL_MIN_SPAN 1000          // raw span required to accept a channel
+#define CAL_SAVE_PIXEL 48          // 'A' corner of the 3x3 grid
+#define CAL_CANCEL_PIXEL 42        // 'B' corner of the 3x3 grid
+const int CAL_POT_PIXEL_BASE = 16; // pots shown on row 3 (pixels 16..23)
+
+// Calibration exit flash feedback (green = saved, white = cancelled)
+unsigned long calFlashStart = 0;
+uint32_t calFlashColor = 0;
+const unsigned long CAL_FLASH_DURATION_MS = 600;
+
 // Deferred EEPROM save: flash erase stalls IRQs for ~10-20 ms, which can
 // starve PIO-USB on Core 1. Flag it here and commit from loop() when quiet,
 // but force the commit after SAVE_DEADLINE_MS so an unplug can't silently
@@ -333,6 +373,13 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   if (EEPROM.read(EEPROM_MAGIC_ADDR) == EEPROM_MAGIC) {
     xyPadMode = EEPROM.read(EEPROM_XYMODE_ADDR) != 0;
+  }
+
+  // Restore per-unit slider/pot calibration (falls back to compiled defaults)
+  if (loadCalibrationFromEeprom()) {
+    Serial.println("Calibration loaded from EEPROM");
+  } else {
+    Serial.println("No stored calibration, using compiled defaults");
   }
 
   // Initialize USB HID for trackpad mouse output
@@ -414,8 +461,12 @@ void loop() {
   // Handle incoming MIDI messages
   readMIDI();
 
-  // Handle pots and sliders
-  updatePotValues();
+  // Handle pots and sliders (or, in calibration mode, track raw min/max)
+  if (calMode) {
+    updateCalibrationMode();
+  } else {
+    updatePotValues();
+  }
 
   // Process queued trackpad reports (from Core 1)
   processTrackpadQueue();
@@ -464,6 +515,7 @@ void loop() {
   }
 
   updateCheatFlash();
+  updateCalFlash();
   maybeCommitEeprom();
 
   // Throttle NeoPixel updates — bit-banging disables interrupts which can
@@ -624,6 +676,7 @@ void maybeCommitEeprom() {
 
   if (!deadline) {
     if (cheatFlashStart != 0) return;                  // flash still running
+    if (calFlashStart != 0) return;                    // cal feedback flash running
     if (queueReadIdx != queueWriteIdx) return;         // trackpad reports pending
     if (now - lastTrackpadActivity < 50) return;       // recent trackpad traffic
   }
@@ -663,6 +716,222 @@ void updateCheatFlash() {
   }
 }
 
+// ============================================================================
+// Slider/pot calibration: EEPROM persistence + on-device calibration mode
+// ============================================================================
+
+static void eepromWrite16(int addr, int value) {
+  EEPROM.write(addr, value & 0xFF);
+  EEPROM.write(addr + 1, (value >> 8) & 0xFF);
+}
+
+static int eepromRead16(int addr) {
+  return EEPROM.read(addr) | (EEPROM.read(addr + 1) << 8);
+}
+
+// Restore calibration saved by a previous run. Returns false (leaving the
+// compiled-in defaults untouched) if the block is missing or corrupt.
+bool loadCalibrationFromEeprom() {
+  if (EEPROM.read(EEPROM_CAL_MAGIC_ADDR) != EEPROM_CAL_MAGIC) return false;
+  if (EEPROM.read(EEPROM_CAL_VER_ADDR) != EEPROM_CAL_VERSION) return false;
+
+  uint8_t checksum = CAL_CHECKSUM_SEED;
+  for (int i = 0; i < CAL_NUM_VALUES * 2; i++) {
+    checksum ^= EEPROM.read(EEPROM_CAL_DATA_ADDR + i);
+  }
+  if (checksum != EEPROM.read(EEPROM_CAL_CHECKSUM_ADDR)) {
+    Serial.println("Calibration block checksum mismatch, using defaults");
+    return false;
+  }
+
+  int addr = EEPROM_CAL_DATA_ADDR;
+  for (int i = 0; i < NUM_SLIDERS; i++, addr += 2) sliderMinValues[i] = eepromRead16(addr);
+  for (int i = 0; i < NUM_SLIDERS; i++, addr += 2) sliderMaxValues[i] = eepromRead16(addr);
+  for (int i = 0; i < NUM_POTS; i++, addr += 2) potMinValues[i] = eepromRead16(addr);
+  for (int i = 0; i < NUM_POTS; i++, addr += 2) potMaxValues[i] = eepromRead16(addr);
+  return true;
+}
+
+// Stage the current calibration arrays into EEPROM. The actual flash commit
+// is deferred via pendingEepromSave (see maybeCommitEeprom).
+void saveCalibrationToEeprom() {
+  int addr = EEPROM_CAL_DATA_ADDR;
+  for (int i = 0; i < NUM_SLIDERS; i++, addr += 2) eepromWrite16(addr, sliderMinValues[i]);
+  for (int i = 0; i < NUM_SLIDERS; i++, addr += 2) eepromWrite16(addr, sliderMaxValues[i]);
+  for (int i = 0; i < NUM_POTS; i++, addr += 2) eepromWrite16(addr, potMinValues[i]);
+  for (int i = 0; i < NUM_POTS; i++, addr += 2) eepromWrite16(addr, potMaxValues[i]);
+
+  uint8_t checksum = CAL_CHECKSUM_SEED;
+  for (int i = 0; i < CAL_NUM_VALUES * 2; i++) {
+    checksum ^= EEPROM.read(EEPROM_CAL_DATA_ADDR + i);
+  }
+  EEPROM.write(EEPROM_CAL_MAGIC_ADDR, EEPROM_CAL_MAGIC);
+  EEPROM.write(EEPROM_CAL_VER_ADDR, EEPROM_CAL_VERSION);
+  EEPROM.write(EEPROM_CAL_CHECKSUM_ADDR, checksum);
+
+  pendingEepromSave = true;
+  pendingEepromSaveTime = millis();
+}
+
+void enterCalMode() {
+  calMode = true;
+  cheatProgress = 0;
+  calSeqProgress = 0;
+  for (int i = 0; i < NUM_SLIDERS; i++) {
+    calMinSlider[i] = 4095;
+    calMaxSlider[i] = 0;
+  }
+  for (int i = 0; i < NUM_POTS; i++) {
+    calMinPot[i] = 4095;
+    calMaxPot[i] = 0;
+  }
+  keypadPixels.clear();
+  Serial.println("Calibration mode: sweep all sliders/pots full travel, then A=save B=cancel");
+}
+
+void exitCalMode(bool save) {
+  calMode = false;
+
+  if (save) {
+    int accepted = 0;
+    // Only channels that were swept through a healthy span are updated, so
+    // a partial calibration (e.g. one replaced slider) leaves the rest alone.
+    for (int i = 0; i < NUM_SLIDERS; i++) {
+      if (calMaxSlider[i] - calMinSlider[i] >= CAL_MIN_SPAN) {
+        sliderMinValues[i] = calMinSlider[i];
+        sliderMaxValues[i] = calMaxSlider[i];
+        accepted++;
+      }
+    }
+    for (int i = 0; i < NUM_POTS; i++) {
+      if (calMaxPot[i] - calMinPot[i] >= CAL_MIN_SPAN) {
+        potMinValues[i] = calMinPot[i];
+        potMaxValues[i] = calMaxPot[i];
+        accepted++;
+      }
+    }
+    saveCalibrationToEeprom();
+    Serial.print("Calibration saved, channels updated: ");
+    Serial.println(accepted);
+  } else {
+    Serial.println("Calibration cancelled");
+  }
+
+  // Force re-init of the filtering pipeline so new ranges apply immediately
+  for (int i = 0; i < NUM_SLIDERS; i++) {
+    previousSliderValues[i] = -1;
+    smoothedSliderValues[i] = 0;
+    lastSliderDirection[i] = 0;
+    sliderRawRejects[i] = 0;
+  }
+  for (int i = 0; i < NUM_POTS; i++) {
+    previousPotValues[i] = -1;
+    smoothedPotValues[i] = 0;
+    lastPotDirection[i] = 0;
+    potRawRejects[i] = 0;
+  }
+
+  // Restore normal LED state from MIDI velocities
+  keypadPixels.clear();
+  for (int i = 0; i < NUMPIXELS; i++) {
+    int note = padToNote[i];
+    int pixel = padToPixel[i];
+    if (note >= 0 && pixel >= 0 && velocities[note] > 0) {
+      keypadPixels.setPixelColor(pixel, velocityToColor(velocities[note]));
+    }
+  }
+
+  calFlashColor = save ? keypadPixels.Color(0x00, 0x80, 0x00)   // green = saved
+                       : keypadPixels.Color(0x40, 0x40, 0x40);  // white = cancelled
+  calFlashStart = millis();
+}
+
+// Sample every channel, track min/max, and paint per-channel progress LEDs:
+// sliders on pixels 0..11, pots on pixels 16..23. Red = not enough travel
+// seen yet, green = channel will be accepted on save.
+void updateCalibrationMode() {
+  static unsigned long lastCalUpdate = 0;
+  if (millis() - lastCalUpdate < 5) return;
+  lastCalUpdate = millis();
+
+  for (int ch = 0; ch < NUM_SLIDERS; ch++) {
+    mux.channel(ch);
+    delayMicroseconds(100);
+    int raw = readBurstTrimmedMean(SLIDERS_PIN);
+    if (raw < calMinSlider[ch]) calMinSlider[ch] = raw;
+    if (raw > calMaxSlider[ch]) calMaxSlider[ch] = raw;
+    bool ok = (calMaxSlider[ch] - calMinSlider[ch]) >= CAL_MIN_SPAN;
+    keypadPixels.setPixelColor(ch, ok ? keypadPixels.Color(0x00, 0x30, 0x00)
+                                      : keypadPixels.Color(0x30, 0x00, 0x00));
+  }
+
+  for (int ch = 0; ch < NUM_POTS; ch++) {
+    mux.channel(ch);
+    delayMicroseconds(100);
+    int raw = readBurstTrimmedMean(POTS_PIN);
+    if (raw < calMinPot[ch]) calMinPot[ch] = raw;
+    if (raw > calMaxPot[ch]) calMaxPot[ch] = raw;
+    bool ok = (calMaxPot[ch] - calMinPot[ch]) >= CAL_MIN_SPAN;
+    keypadPixels.setPixelColor(CAL_POT_PIXEL_BASE + ch,
+                               ok ? keypadPixels.Color(0x00, 0x30, 0x00)
+                                  : keypadPixels.Color(0x30, 0x00, 0x00));
+  }
+
+  // Hint keys: A = save (green), B = cancel (white)
+  keypadPixels.setPixelColor(CAL_SAVE_PIXEL, keypadPixels.Color(0x00, 0x80, 0x00));
+  keypadPixels.setPixelColor(CAL_CANCEL_PIXEL, keypadPixels.Color(0x40, 0x40, 0x40));
+}
+
+void updateCalFlash() {
+  if (calFlashStart == 0) return;
+
+  unsigned long elapsed = millis() - calFlashStart;
+  if (elapsed >= CAL_FLASH_DURATION_MS) {
+    for (int i = 0; i < 9; i++) {
+      int keyIndex = CHEAT_GRID_KEYIDX[i];
+      int pixel = padToPixel[keyIndex];
+      int midiNote = padToNote[keyIndex];
+      if (pixel >= 0 && midiNote >= 0) {
+        keypadPixels.setPixelColor(pixel, velocityToColor(velocities[midiNote]));
+      }
+    }
+    calFlashStart = 0;
+    return;
+  }
+
+  bool on = (elapsed / 75) % 2 == 0;
+  for (int i = 0; i < 9; i++) {
+    int pixel = padToPixel[CHEAT_GRID_KEYIDX[i]];
+    if (pixel >= 0) {
+      keypadPixels.setPixelColor(pixel, on ? calFlashColor : 0);
+    }
+  }
+}
+
+// Track progress through the calibration entry sequence (corner circles).
+// Mirrors processCheatCode's timeout behaviour with its own counter.
+void processCalSequence(int pixel) {
+  if (pixel < 40 || pixel > 48) return;
+
+  unsigned long now = millis();
+  if (calSeqProgress > 0 && now - calSeqLastInputTime > CHEAT_TIMEOUT_MS) {
+    calSeqProgress = 0;
+  }
+  calSeqLastInputTime = now;
+
+  if (pixel == CAL_SEQ[calSeqProgress]) {
+    calSeqProgress++;
+    if (calSeqProgress >= CAL_SEQ_LEN) {
+      calSeqProgress = 0;
+      enterCalMode();
+    }
+  } else if (pixel == CAL_SEQ[0]) {
+    calSeqProgress = 1;
+  } else {
+    calSeqProgress = 0;
+  }
+}
+
 void handleKeypad() {
   if (tca8418.available() > 0) {
     int k = tca8418.getEvent();
@@ -677,7 +946,15 @@ void handleKeypad() {
       int midiNote = padToNote[keyIndex];
 
       if (pressed) {
+        if (calMode) {
+          // Calibration mode swallows key presses: A saves, B cancels
+          int pixel = padToPixel[keyIndex];
+          if (pixel == CAL_SAVE_PIXEL) exitCalMode(true);
+          else if (pixel == CAL_CANCEL_PIXEL) exitCalMode(false);
+          return;
+        }
         processCheatCode(padToPixel[keyIndex]);
+        processCalSequence(padToPixel[keyIndex]);
 
         if (usbDeviceReady()) {
           MIDI.sendNoteOn(midiNote, 127, MIDI_OUT_CH);
@@ -925,7 +1202,7 @@ void readMIDI() {
 
         if (velocity == FLASHING_VELOCITY) {
           // Flashing LEDs handled in updateFlashingLEDs
-        } else {
+        } else if (!calMode) {  // velocities still tracked; LEDs restored on cal exit
           keypadPixels.setPixelColor(padToPixel[padIndex], color);
         }
       }
@@ -935,7 +1212,9 @@ void readMIDI() {
       if (padIndex != -1) {
         velocities[midiNote] = 0;
         keysUpdated[padIndex] = true;
-        keypadPixels.setPixelColor(padToPixel[padIndex], 0);
+        if (!calMode) {
+          keypadPixels.setPixelColor(padToPixel[padIndex], 0);
+        }
       }
     }
   }
@@ -962,6 +1241,7 @@ bool shouldSkipRefresh() {
 }
 
 void updateFlashingLEDs() {
+  if (calMode) return;
   for (int i = 0; i < NUMPIXELS; i++) {
     int midiNote = padToNote[i];
     int velocity = velocities[midiNote];
