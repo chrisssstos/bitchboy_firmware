@@ -1,0 +1,58 @@
+name: Build firmware
+
+# When the firmware source changes, rebuild the UF2 and commit the refreshed
+# flasher/firmware/bitchboy-latest.uf2 straight back to main. GitHub Pages
+# serves the flasher from the branch, so it always offers the latest build —
+# with no manual rebuild step.
+#
+# This deliberately uses NO build artifacts and NO Pages-via-Actions deploy,
+# so it is unaffected by the Actions artifact-storage quota.
+#
+# One-time setup: repo Settings -> Pages -> "Deploy from a branch" -> main / (root).
+# The flasher then lives at  https://<user>.github.io/<repo>/flasher/
+
+on:
+  push:
+    branches: [main]
+    # Only rebuild when something that affects the binary changes. The commit
+    # this workflow makes touches only the UF2 (outside these paths), so it
+    # never retriggers itself.
+    paths:
+      - 'firmware/**'
+      - 'tools/build_firmware.sh'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build firmware UF2
+        run: bash tools/build_firmware.sh
+
+      - name: Commit refreshed UF2 if it changed
+        run: |
+          if git diff --quiet -- flasher/firmware/bitchboy-latest.uf2; then
+            echo "UF2 unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flasher/firmware/bitchboy-latest.uf2
+          git commit -m "CI: rebuild firmware UF2 [skip ci]"
+          git push

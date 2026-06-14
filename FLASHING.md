@@ -65,12 +65,15 @@ The script reproduces the known-good IDE setup exactly (see pins inside):
   the copy bundled with the core must be used
 
 Outputs land in `dist/` (versioned) and `flasher/firmware/bitchboy-latest.uf2`
-(what the web page serves). To release: build, commit the updated
-`flasher/firmware/bitchboy-latest.uf2`, push — GitHub Pages serves the rest.
+(what the web page serves). You normally don't run this by hand to release:
+CI (`.github/workflows/build.yml`) rebuilds the UF2 and commits the refreshed
+`flasher/firmware/bitchboy-latest.uf2` back to `main` whenever the firmware
+source changes, so the hosted flasher stays current automatically.
 
-To host the flasher on GitHub Pages: repo Settings → Pages → deploy from
-branch, folder `/flasher` (or copy `flasher/` to a `gh-pages` branch /
-`docs/` folder). The page is fully static.
+To host the flasher on GitHub Pages: repo Settings → Pages → **Deploy from a
+branch** → `main` / `(root)`. GitHub Pages serves from the repo root, so the
+flasher lives at `https://<user>.github.io/<repo>/flasher/`. The page is fully
+static.
 
 ## How the web flasher works
 

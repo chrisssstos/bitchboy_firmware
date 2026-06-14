@@ -8,7 +8,7 @@ RP2350 (Raspberry Pi Pico 2).
 
 Open the web flasher in **Chrome or Edge** and follow the two steps:
 
-**→ https://chrisssstos.github.io/bitchboy_firmware/**
+**→ https://chrisssstos.github.io/bitchboy_firmware/flasher/**
 
 It reboots the device into its bootloader and writes the latest firmware from
 your browser — no Arduino, no drivers, no install. Your slider/pot calibration
@@ -43,8 +43,9 @@ Output:
 Flash the result the same way users do: pick it with **"use local .uf2"** in
 the web flasher, or drag it onto the `RP2350` USB drive.
 
-CI (`.github/workflows/deploy.yml`) rebuilds the UF2 and redeploys the flasher
-to GitHub Pages on every push to `main`, so the hosted flasher is never stale.
+CI (`.github/workflows/build.yml`) rebuilds the UF2 from source whenever the
+firmware changes and commits the refreshed `bitchboy-latest.uf2` back to `main`,
+so the Pages-hosted flasher is never stale — no manual rebuild needed.
 
 ## Repo layout
 
