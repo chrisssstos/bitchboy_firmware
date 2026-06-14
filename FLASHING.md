@@ -18,12 +18,14 @@ with an on-device calibration mode — it survives firmware updates.
 
 Manual fallback (any browser/OS): hold the BOOT button while plugging in,
 then drag `bitchboy-latest.uf2` onto the `RP2350` USB drive that appears.
-Note: the drag-and-drop path writes picotool's RP2350-E10 workaround block,
-which on 4 MB flash parts lands on the calibration sector — so calibration
-may need to be redone afterwards. The web flasher skips that block and
-preserves calibration; it is the recommended path.
+This preserves calibration too: on current builds (arduino-pico core ≥ 5.x)
+the EEPROM/calibration block lives in the second-to-last flash sector, while
+picotool's RP2350-E10 workaround block lands on the *last* sector. They no
+longer share a sector, so the drag-and-drop write never erases calibration.
+The web flasher is still the recommended path (one click, no BOOT button),
+but the manual path is now safe as well.
 
-## For users: calibrating sliders/pots (once, or after the fallback path)
+## For users: calibrating sliders/pots (once, or if it ever drifts)
 
 No computer needed:
 
@@ -77,6 +79,8 @@ branch, folder `/flasher` (or copy `flasher/` to a `gh-pages` branch /
   (same mechanism the Arduino IDE uses to upload).
 - **Step 2** talks **PICOBOOT** (the RP2040/RP2350 ROM bootloader's native
   USB protocol) over WebUSB: exclusive access → exit XIP → per-4KB-sector
-  erase + write → reboot. The UF2 is parsed in the browser; the E10
-  ABSOLUTE block is skipped (see above), and the EEPROM/calibration sector
-  at the end of flash is never written.
+  erase + write → reboot. The UF2 is parsed in the browser and the E10
+  ABSOLUTE block is skipped. (With current builds calibration would survive
+  even without skipping it — it lives in the second-to-last sector while the
+  E10 block targets the last sector — but skipping it avoids touching that
+  top sector at all, and saves a redundant erase/write.)

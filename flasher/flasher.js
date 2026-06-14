@@ -8,8 +8,10 @@
 // The E10-erratum ABSOLUTE block (0x10ffff00) that picotool appends to
 // RP2350 UF2s is deliberately skipped: it only exists for mass-storage
 // drag-and-drop flashing, and on 4MB-flash devices its address wraps onto
-// the last flash sector — which is where the EEPROM-emulated calibration
-// lives. Skipping it is what makes web flashing preserve calibration.
+// the LAST flash sector. EEPROM-emulated calibration lives in the
+// second-to-last sector (arduino-pico core >= 5.x), so skipping the block
+// isn't strictly required to preserve calibration — but it avoids erasing
+// the top sector and saves a redundant write, so we skip it anyway.
 
 'use strict';
 
