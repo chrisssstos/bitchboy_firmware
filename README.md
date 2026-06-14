@@ -8,12 +8,15 @@ RP2350 (Raspberry Pi Pico 2).
 
 Open the web flasher in **Chrome or Edge** and follow the two steps:
 
-**→ https://chrisssstos.github.io/bitchboy_firmware/flasher/**
+**→ https://bitchboy.lol/flasher**
 
 It reboots the device into its bootloader and writes the latest firmware from
 your browser — no Arduino, no drivers, no install. Your slider/pot calibration
 and settings are preserved. Full walkthrough (incl. on-device calibration) in
 [FLASHING.md](FLASHING.md).
+
+> The flasher UI lives in the site repo (`bitchboy-site-saxion`); it fetches the
+> firmware binary from **this** repo. This repo hosts the firmware + build.
 
 > Tip: if "Enter update mode" can't open the device, quit any app that might be
 > using it (Ableton or another DAW, MIDI tools, other browser tabs), replug,
@@ -37,15 +40,15 @@ cd bitchboy_firmware
 ```
 
 Output:
-- `flasher/firmware/bitchboy-latest.uf2` — what the web flasher serves
+- `flasher/firmware/bitchboy-latest.uf2` — the binary the site flasher fetches
 - `dist/bitchboy-<git-rev>.uf2` — a versioned copy
 
 Flash the result the same way users do: pick it with **"use local .uf2"** in
-the web flasher, or drag it onto the `RP2350` USB drive.
+the site flasher, or drag it onto the `RP2350` USB drive.
 
 CI (`.github/workflows/build.yml`) rebuilds the UF2 from source whenever the
 firmware changes and commits the refreshed `bitchboy-latest.uf2` back to `main`,
-so the Pages-hosted flasher is never stale — no manual rebuild needed.
+so the binary the site fetches is never stale — no manual rebuild needed.
 
 ## Repo layout
 
@@ -54,7 +57,7 @@ so the Pages-hosted flasher is never stale — no manual rebuild needed.
 | `firmware/bitchboy_main.ino` | The firmware |
 | `firmware/patched_pio_usb/` | Required Pico-PIO-USB patch (bounded busy-loops) |
 | `ableton/BitchBoy/` | Ableton Live control-surface script |
-| `flasher/` | Static WebUSB/WebSerial flasher (served via GitHub Pages) |
+| `flasher/firmware/` | Built firmware binary the site flasher fetches |
 | `tools/build_firmware.sh` | One-command reproducible build |
 | `hardware/` | Enclosure CAD |
 | `experiments/` | Old/experimental sketches — not built, kept for reference |
@@ -71,5 +74,5 @@ package — the copy bundled with the core must be used. See the header of
 
 ---
 
-The web flasher, build tooling, CI, and documentation in this repo were
-generated with [Claude](https://claude.com/claude-code) (Anthropic).
+The build tooling, CI, and documentation in this repo (and the web flasher in
+the site repo) were generated with [Claude](https://claude.com/claude-code) (Anthropic).

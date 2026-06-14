@@ -7,8 +7,11 @@ with an on-device calibration mode — it survives firmware updates.
 
 ## For users: web flasher
 
-1. Open the flasher page (`flasher/index.html`, hosted e.g. on GitHub Pages)
-   in **Chrome or Edge** on desktop.
+The web flasher lives on the BitchBoy site: **https://bitchboy.lol/flasher**
+(source in the `bitchboy-site-saxion` repo). It pulls the latest firmware from
+this repo automatically. This repo only hosts the firmware binary it serves.
+
+1. Open **https://bitchboy.lol/flasher** in **Chrome or Edge** on desktop.
 2. Plug in the BitchBoy.
 3. **Step 1 — Enter update mode**: click, pick *BitchBoy* from the list.
    The device reboots into its bootloader (LEDs go dark).
@@ -70,10 +73,11 @@ CI (`.github/workflows/build.yml`) rebuilds the UF2 and commits the refreshed
 `flasher/firmware/bitchboy-latest.uf2` back to `main` whenever the firmware
 source changes, so the hosted flasher stays current automatically.
 
-To host the flasher on GitHub Pages: repo Settings → Pages → **Deploy from a
-branch** → `main` / `(root)`. GitHub Pages serves from the repo root, so the
-flasher lives at `https://<user>.github.io/<repo>/flasher/`. The page is fully
-static.
+The flasher UI itself is not hosted from this repo — it lives on the BitchBoy
+site (`bitchboy-site-saxion`, deployed to https://bitchboy.lol/flasher) and
+fetches the firmware binary from this repo over `raw.githubusercontent.com`.
+This repo only needs to keep that binary current on `main` (the CI above does
+that) and be **public** (a private repo 404s the cross-origin fetch).
 
 ## How the web flasher works
 
