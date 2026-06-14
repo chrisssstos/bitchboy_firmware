@@ -273,7 +273,11 @@ $('btn-reboot').addEventListener('click', async () => {
   const status = $('status1');
   try {
     setStatus(status, 'pick the BitchBoy in the browser dialog…', 'busy');
-    const port = await navigator.serial.requestPort({ filters: [BITCHBOY_SERIAL_FILTER] });
+    // No filter: forks and older firmware may use a different USB VID/PID, and
+    // the 1200-baud touch works on ANY TinyUSB CDC port regardless of ID. The
+    // device advertises the product name "BitchBoy", so it's easy to spot in
+    // the chooser. (BITCHBOY_SERIAL_FILTER is kept for reference only.)
+    const port = await navigator.serial.requestPort();
     setStatus(status, 'sending reboot command…', 'busy');
     await port.open({ baudRate: 1200 });
     await new Promise((r) => setTimeout(r, 200));
@@ -284,7 +288,10 @@ $('btn-reboot').addEventListener('click', async () => {
     $('step2').classList.add('active');
   } catch (e) {
     if (e.name === 'NotFoundError') {
-      setStatus(status, 'no device picked.', '');
+      // Empty chooser or user cancelled. The BitchBoy must be running normal
+      // firmware that exposes a serial port for this step to find it — if it
+      // isn't listed, just hold BOOT while plugging in and skip to step 2.
+      setStatus(status, "no serial port picked — if none appeared, hold BOOT while plugging in and skip to step 2.", '');
     } else {
       log('step 1 error: ' + e.message);
       setStatus(status, 'failed: ' + e.message + ' — try the manual fallback below.', 'err');
