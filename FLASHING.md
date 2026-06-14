@@ -59,7 +59,7 @@ The script reproduces the known-good IDE setup exactly (see pins inside):
   (Pico-PIO-USB needs a multiple of 12 MHz), USB stack **Adafruit TinyUSB**
 - arduino-pico core and all libraries at pinned versions, installed into
   `build/arduino-user/` so your own sketchbook is never touched
-- applies `bitchboy_code_claude/patched_pio_usb/` over the Pico PIO USB
+- applies `firmware/patched_pio_usb/` over the Pico PIO USB
   library (bounded busy-loop fix)
 - deliberately does **not** install the "Adafruit TinyUSB Library" package —
   the copy bundled with the core must be used

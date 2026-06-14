@@ -29,7 +29,7 @@ git clone https://github.com/chrisssstos/bitchboy_firmware.git
 cd bitchboy_firmware
 
 # edit the firmware
-#   bitchboy_code_claude/bitchboy_main.ino
+#   firmware/bitchboy_main.ino
 
 # build — installs a pinned, isolated toolchain, applies the pio_usb patch,
 # and outputs the UF2 (does not touch your own Arduino setup)
@@ -50,10 +50,9 @@ to GitHub Pages on every push to `main`, so the hosted flasher is never stale.
 
 | Path | What |
 |---|---|
-| `bitchboy_code_claude/bitchboy_main.ino` | The firmware |
-| `bitchboy_code_claude/patched_pio_usb/` | Required Pico-PIO-USB patch (bounded busy-loops) |
-| `bitchboy_code_claude/tusb_config.h` | TinyUSB config for IDE builds |
-| `bitchboy_code_claude/AbletonRemoteScript/` | Ableton Live control-surface script |
+| `firmware/bitchboy_main.ino` | The firmware |
+| `firmware/patched_pio_usb/` | Required Pico-PIO-USB patch (bounded busy-loops) |
+| `ableton/BitchBoy/` | Ableton Live control-surface script |
 | `flasher/` | Static WebUSB/WebSerial flasher (served via GitHub Pages) |
 | `tools/build_firmware.sh` | One-command reproducible build |
 | `hardware/` | Enclosure CAD |
@@ -68,3 +67,8 @@ and applies `patched_pio_usb/` over the installed Pico PIO USB library. It
 deliberately does **not** install the separate "Adafruit TinyUSB Library"
 package — the copy bundled with the core must be used. See the header of
 `tools/build_firmware.sh` for the exact pinned versions.
+
+---
+
+The web flasher, build tooling, CI, and documentation in this repo were
+generated with [Claude](https://claude.com/claude-code) (Anthropic).

@@ -10,7 +10,7 @@
 #   - Core:      rp2040:rp2040 (earlephilhower arduino-pico), pinned below
 #   - Libraries: pinned below, installed into an isolated directory so the
 #                machine's own sketchbook is never touched
-#   - Patch:     bitchboy_code_claude/patched_pio_usb/ files are copied over
+#   - Patch:     firmware/patched_pio_usb/ files are copied over
 #                the installed Pico PIO USB library (bounded busy-loops fix,
 #                see that folder's README)
 #
@@ -24,8 +24,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_INO="$REPO_ROOT/bitchboy_code_claude/bitchboy_main.ino"
-PATCH_DIR="$REPO_ROOT/bitchboy_code_claude/patched_pio_usb"
+SRC_INO="$REPO_ROOT/firmware/bitchboy_main.ino"
+PATCH_DIR="$REPO_ROOT/firmware/patched_pio_usb"
 BUILD_DIR="$REPO_ROOT/build"
 DIST_DIR="$REPO_ROOT/dist"
 FLASHER_FW_DIR="$REPO_ROOT/flasher/firmware"
