@@ -245,6 +245,7 @@ unsigned long lastMessageTime = 0;
 const unsigned long batchTimeout = 10;
 bool inBatch = false;
 bool keysUpdated[NUMPIXELS];
+bool keyHeld[NUMPIXELS] = {false};  // Live press state per key, by keyIndex
 unsigned int batchMessageCount = 0;
 const unsigned int BATCH_MIN_MESSAGE_COUNT = 4;
 const int VELOCITY_BUFFER_SIZE = 10;
@@ -309,8 +310,11 @@ unsigned long cheatFlashStart = 0;
 const unsigned long CHEAT_FLASH_DURATION_MS = 600;
 const int CHEAT_GRID_KEYIDX[9] = {40, 41, 42, 48, 49, 50, 56, 57, 58};
 
-// On-device calibration mode. Entered by circling the 3x3 grid corners
-// clockwise twice: Select(40) B(42) A(48) Start(46), repeated.
+// On-device calibration mode. Entered by holding the entire bottom row of
+// pads (keyIndex 32..39) and, while holding, circling the 3x3 grid corners
+// clockwise twice: Select(40) B(42) A(48) Start(46), repeated. The held-row
+// interlock makes accidental entry effectively impossible — a stray corner
+// tap can never trigger it on its own.
 // While active: normal MIDI output is suppressed, the user sweeps every
 // slider/pot through its full travel, per-channel LEDs go green once a
 // healthy span has been seen, then A(48) saves to EEPROM and B(42) cancels.
@@ -320,6 +324,18 @@ const int CAL_SEQ[] = {40, 42, 48, 46, 40, 42, 48, 46};
 const int CAL_SEQ_LEN = sizeof(CAL_SEQ) / sizeof(CAL_SEQ[0]);
 int calSeqProgress = 0;
 unsigned long calSeqLastInputTime = 0;
+
+// Safety interlock: the whole bottom row must be held down throughout the
+// corner circle. Indices are keyIndex values (== padToPixel for this row).
+const int CAL_GUARD_KEYS[] = {32, 33, 34, 35, 36, 37, 38, 39};
+const int CAL_GUARD_LEN = sizeof(CAL_GUARD_KEYS) / sizeof(CAL_GUARD_KEYS[0]);
+
+static bool calGuardHeld() {
+  for (int i = 0; i < CAL_GUARD_LEN; i++) {
+    if (!keyHeld[CAL_GUARD_KEYS[i]]) return false;
+  }
+  return true;
+}
 
 bool calMode = false;
 int calMinSlider[NUM_SLIDERS], calMaxSlider[NUM_SLIDERS];
@@ -919,6 +935,12 @@ void processCalSequence(int pixel) {
   }
   calSeqLastInputTime = now;
 
+  // Bottom row must be held the whole time; otherwise the circle doesn't count.
+  if (!calGuardHeld()) {
+    calSeqProgress = 0;
+    return;
+  }
+
   if (pixel == CAL_SEQ[calSeqProgress]) {
     calSeqProgress++;
     if (calSeqProgress >= CAL_SEQ_LEN) {
@@ -946,6 +968,7 @@ void handleKeypad() {
       int midiNote = padToNote[keyIndex];
 
       if (pressed) {
+        keyHeld[keyIndex] = true;
         if (calMode) {
           // Calibration mode swallows key presses: A saves, B cancels
           int pixel = padToPixel[keyIndex];
@@ -970,6 +993,7 @@ void handleKeypad() {
         Serial.print(midiNote);
         Serial.println(" ON");
       } else {
+        keyHeld[keyIndex] = false;
         if (usbDeviceReady()) {
           MIDI.sendNoteOff(midiNote, 0, MIDI_OUT_CH);
         }
