@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BitchBoy Firmware Flasher</title>
+<style>
+  :root {
+    --bg: #0d0d0f;
+    --panel: #16161a;
+    --border: #2a2a30;
+    --text: #e8e8ea;
+    --dim: #8a8a92;
+    --orange: #d63500;
+    --green: #18c964;
+    --red: #ff3b30;
+    --blue: #0055ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px;
+  }
+  main { width: 100%; max-width: 640px; }
+  h1 {
+    font-size: 22px;
+    letter-spacing: 0.08em;
+    margin: 0 0 4px;
+  }
+  h1 .accent { color: var(--orange); }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 28px; }
+  .step {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 14px;
+  }
+  .step h2 {
+    font-size: 14px;
+    margin: 0 0 8px;
+    letter-spacing: 0.05em;
+  }
+  .step p { font-size: 13px; color: var(--dim); margin: 6px 0 12px; line-height: 1.5; }
+  .step.done { border-color: var(--green); }
+  .step.active { border-color: var(--orange); }
+  button {
+    background: var(--orange);
+    border: none;
+    color: #fff;
+    font: inherit;
+    font-size: 13px;
+    padding: 10px 18px;
+    border-radius: 6px;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.15); }
+  button:disabled { background: #333; color: #777; cursor: not-allowed; }
+  button.secondary { background: #2a2a30; color: var(--text); }
+  .status { font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .status.ok { color: var(--green); }
+  .status.err { color: var(--red); }
+  .status.busy { color: var(--orange); }
+  progress {
+    width: 100%;
+    height: 8px;
+    margin-top: 12px;
+    appearance: none;
+    -webkit-appearance: none;
+    display: none;
+  }
+  progress.visible { display: block; }
+  progress::-webkit-progress-bar { background: #26262c; border-radius: 4px; }
+  progress::-webkit-progress-value { background: var(--green); border-radius: 4px; }
+  .fw-meta { font-size: 12px; color: var(--dim); margin-top: 10px; }
+  .fw-meta b { color: var(--text); }
+  details { margin-top: 24px; font-size: 13px; color: var(--dim); }
+  details summary { cursor: pointer; padding: 6px 0; }
+  details .step { margin-top: 10px; }
+  code {
+    background: #222228;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 12px;
+  }
+  #log {
+    background: #0a0a0c;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 11px;
+    color: var(--dim);
+    max-height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    margin-top: 10px;
+  }
+  #unsupported {
+    display: none;
+    border: 1px solid var(--red);
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 13px;
+    line-height: 1.6;
+    margin-bottom: 20px;
+  }
+  a { color: var(--blue); }
+  input[type=file] { display: none; }
+  label.filebtn {
+    display: inline-block;
+    background: #2a2a30;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>BITCHBOY <span class="accent">//</span> FLASHER</h1>
+  <div class="sub">BLOCK SYSTEM Hardware — flash the latest firmware from your browser. No drivers, no IDE, no setup. Calibration and settings on the device are preserved.</div>
+
+  <div id="unsupported">
+    This browser can't talk to USB devices. Use <b>Chrome</b>, <b>Edge</b> or another
+    Chromium-based browser on desktop, or follow the manual steps at the bottom of this page.
+  </div>
+
+  <div class="step" id="step-fw">
+    <h2>FIRMWARE</h2>
+    <p id="fw-desc">Latest bundled firmware will be used. You can also pick a local <code>.uf2</code> file.</p>
+    <span class="fw-meta" id="fw-meta">loading…</span>
+    <label class="filebtn">use local .uf2<input type="file" id="fw-file" accept=".uf2"></label>
+  </div>
+
+  <div class="step" id="step1">
+    <h2>STEP 1 — ENTER UPDATE MODE</h2>
+    <p>Plug the BitchBoy into this computer, then click below and pick <b>BitchBoy</b> from the list.
+       The device will reboot into its bootloader (LEDs go dark — that's normal).<br>
+       Already holding BOOTSEL / device shows up as a USB drive? Skip to step 2.</p>
+    <button id="btn-reboot">Enter update mode</button>
+    <div class="status" id="status1"></div>
+  </div>
+
+  <div class="step" id="step2">
+    <h2>STEP 2 — FLASH</h2>
+    <p>Click below and pick the <b>RP2 Boot</b> / <b>RP2350 Boot</b> device from the list.
+       Flashing takes a few seconds. Don't unplug until it says done.</p>
+    <button id="btn-flash">Flash firmware</button>
+    <div class="status" id="status2"></div>
+    <progress id="progress" max="100" value="0"></progress>
+  </div>
+
+  <details>
+    <summary>Manual fallback (no special browser needed)</summary>
+    <div class="step">
+      <p>
+        1. Download the firmware: <a id="dl-link" href="firmware/bitchboy-latest.uf2" download>bitchboy-latest.uf2</a><br>
+        2. Unplug the BitchBoy. Hold its <b>BOOT</b> button while plugging it back in —
+           a USB drive named <code>RP2350</code> (or <code>RPI-RP2</code>) appears.<br>
+        3. Drag the <code>.uf2</code> file onto that drive. The device reboots by itself.<br><br>
+        Note: flashing this way may reset the stored slider/pot calibration —
+        if sliders feel off afterwards, run the on-device calibration
+        (circle the 3×3 grid corners clockwise twice: Select, B, A, Start ×2,
+        sweep everything full travel, press A to save).
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Log</summary>
+    <div id="log"></div>
+  </details>
+</main>
+<script src="flasher.js"></script>
+</body>
+</html>

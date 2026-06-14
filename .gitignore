@@ -1,0 +1,8 @@
+# Build artifacts (tools/build_firmware.sh)
+build/
+dist/
+
+.DS_Store
+
+# Stray Claude Code session dumps
+conversation-*.txt
