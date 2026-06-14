@@ -1,0 +1,64 @@
+name: Build firmware & deploy flasher
+
+# Rebuilds the firmware UF2 from source and publishes the web flasher to
+# GitHub Pages on every push to main. The Pages site therefore always serves
+# a freshly built bitchboy-latest.uf2 — no manual rebuild/commit needed.
+#
+# One-time setup: repo Settings -> Pages -> Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never run two Pages deploys at once; let the newest win.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build firmware UF2
+        run: bash tools/build_firmware.sh
+
+      - name: Assemble Pages site (flasher + freshly built UF2)
+        run: |
+          mkdir -p _site
+          cp -r flasher/. _site/
+          ls -la _site _site/firmware
+
+      - name: Upload UF2 as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitchboy-firmware-uf2
+          path: dist/*.uf2
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

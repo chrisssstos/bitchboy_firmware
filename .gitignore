@@ -4,5 +4,8 @@ dist/
 
 .DS_Store
 
+# Editor / tooling dirs
+.claude/
+
 # Stray Claude Code session dumps
 conversation-*.txt
