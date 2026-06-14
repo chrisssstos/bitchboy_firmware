@@ -293,8 +293,10 @@ $('btn-reboot').addEventListener('click', async () => {
       // isn't listed, just hold BOOT while plugging in and skip to step 2.
       setStatus(status, "no serial port picked — if none appeared, hold BOOT while plugging in and skip to step 2.", '');
     } else {
+      // "Failed to open serial port" almost always means another program has
+      // the BitchBoy open (a DAW like Ableton, a MIDI tool, or another tab).
       log('step 1 error: ' + e.message);
-      setStatus(status, 'failed: ' + e.message + ' — try the manual fallback below.', 'err');
+      setStatus(status, "couldn't open the port — another app is using the BitchBoy. Close every app that might be connected to it (Ableton or another DAW, MIDI tools, other browser tabs), unplug and replug the BitchBoy, then try again.", 'err');
     }
   }
 });
