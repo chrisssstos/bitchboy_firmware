@@ -1,7 +1,6 @@
 # BitchBoy Firmware
 
-Firmware and tooling for the **BitchBoy** — a BLOCK SYSTEM Hardware MIDI
-controller (12 sliders, 8 pots, a keypad, and a USB trackpad) built on an
+Firmware and tooling for the **BitchBoy** built on an
 RP2350 (Raspberry Pi Pico 2).
 
 ## Just want to flash / update firmware? (no coding)
