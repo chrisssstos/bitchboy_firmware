@@ -58,7 +58,6 @@ so the binary the site fetches is never stale — no manual rebuild needed.
 | `ableton/BitchBoy/` | Ableton Live control-surface script |
 | `flasher/firmware/` | Built firmware binary the site flasher fetches |
 | `tools/build_firmware.sh` | One-command reproducible build |
-| `hardware/` | Enclosure CAD |
 | `experiments/` | Old/experimental sketches — not built, kept for reference |
 | `FLASHING.md` | End-user flashing + calibration guide |
 
