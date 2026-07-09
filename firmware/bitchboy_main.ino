@@ -6,6 +6,7 @@
 #include <pio_usb.h>
 #include <EEPROM.h>
 #include "tusb.h"
+#include "pico/unique_id.h"
 
 // Persistent settings (EEPROM emulation in flash)
 #define EEPROM_SIZE        128
@@ -36,42 +37,12 @@
 #define ADC_OUTLIER_THRESHOLD 100          // Reject raw reads this far from smoothed (kills USB-correlated power-rail transients)
 #define ADC_MAX_REJECTS 3                  // After this many consecutive rejections, accept (real fast motion escape hatch)
 
-// Custom USB Device Descriptor
-tusb_desc_device_t custom_desc_device = {
-    .bLength            = sizeof(tusb_desc_device_t),
-    .bDescriptorType    = TUSB_DESC_DEVICE,
-    .bcdUSB             = 0x0200,
-    .bDeviceClass       = TUSB_CLASS_MISC,
-    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
-    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
-    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor           = 0xCafe,
-    .idProduct          = 0x4002,
-    .bcdDevice          = 0x0100,
-    .iManufacturer      = 0x01,
-    .iProduct           = 0x02,
-    .iSerialNumber      = 0x03,
-    .bNumConfigurations = 0x01
-};
+// USB serial number, filled in setup() from the RP2350's factory-burned
+// unique board ID. Must be file-scope: setSerialDescriptor() keeps the
+// pointer, it does not copy the string. Windows MIDI Services keys
+// persistent device identity to this, so it must differ per unit.
+static char usbSerial[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
 
-// Custom String Descriptors
-const char* custom_string_desc_arr[] = {
-    (const char[]){0x09, 0x04},  // 0: Supported language is English
-    "BLOCK SYSTEM Hardware",                // 1: Manufacturer
-    "BitchBoy",                  // 2: Product name
-    "123456",                    // 3: Serial number
-};
-
-// Override the default descriptors
-extern "C" {
-const tusb_desc_device_t* tud_desc_get_custom_device(void) {
-    return &custom_desc_device;
-}
-
-const char* const* tud_desc_get_custom_string(void) {
-    return custom_string_desc_arr;
-}
-}
 // User variables
 int MIDI_OUT_CH = 1;  // MIDI output channel
 
@@ -380,7 +351,8 @@ void setup() {
   // Set custom USB descriptors before anything else
   TinyUSBDevice.setManufacturerDescriptor("BLOCK SYSTEM");
   TinyUSBDevice.setProductDescriptor("BitchBoy");
-  TinyUSBDevice.setSerialDescriptor("123456");
+  pico_get_unique_board_id_string(usbSerial, sizeof(usbSerial));
+  TinyUSBDevice.setSerialDescriptor(usbSerial);
   Serial.begin(115200);  // Initialize Serial for debugging
   Wire.begin();
   Wire.setClock(400000); // TCA8418 max is 400kHz
