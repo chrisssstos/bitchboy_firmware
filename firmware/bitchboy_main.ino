@@ -286,9 +286,14 @@ const int CHEAT_GRID_KEYIDX[9] = {40, 41, 42, 48, 49, 50, 56, 57, 58};
 // clockwise twice: Select(40) B(42) A(48) Start(46), repeated. The held-row
 // interlock makes accidental entry effectively impossible — a stray corner
 // tap can never trigger it on its own.
-// While active: normal MIDI output is suppressed, the user sweeps every
-// slider/pot through its full travel, per-channel LEDs go green once a
-// healthy span has been seen, then A(48) saves to EEPROM and B(42) cancels.
+// While active: normal MIDI output is suppressed and the mode runs two pages.
+// Page 1 (key test): every pad starts dim red, turns green once pressed and
+// shows white while held, so dead switches (stay red), dead LEDs (stay dark)
+// and stuck keys (stay white) are all visible. When all 49 pads have been
+// pressed it advances on its own; holding B(42) skips ahead if a key is dead.
+// Page 2 (analog): the user sweeps every slider/pot through its full travel,
+// per-channel LEDs go green once a healthy span has been seen, then A(48)
+// saves to EEPROM and B(42) cancels.
 // Defaults compiled into the firmware are only used when EEPROM holds no
 // valid calibration, so one universal .uf2 works on every unit.
 const int CAL_SEQ[] = {40, 42, 48, 46, 40, 42, 48, 46};
@@ -315,6 +320,15 @@ int calMinPot[NUM_POTS], calMaxPot[NUM_POTS];
 #define CAL_SAVE_PIXEL 48          // 'A' corner of the 3x3 grid
 #define CAL_CANCEL_PIXEL 42        // 'B' corner of the 3x3 grid
 const int CAL_POT_PIXEL_BASE = 16; // pots shown on row 3 (pixels 16..23)
+
+enum CalPage { CAL_PAGE_KEYTEST, CAL_PAGE_ANALOG };
+CalPage calPage = CAL_PAGE_KEYTEST;
+bool keyTested[NUMPIXELS];                 // by keyIndex
+unsigned long calSkipHoldStart = 0;        // B press time on the key test page
+const unsigned long CAL_SKIP_HOLD_MS = 1500;
+unsigned long calPageFlashStart = 0;       // full-pad flash on page change
+uint32_t calPageFlashColor = 0;
+const unsigned long CAL_PAGE_FLASH_MS = 400;
 
 // Calibration exit flash feedback (green = saved, white = cancelled)
 unsigned long calFlashStart = 0;
@@ -451,7 +465,8 @@ void loop() {
 
   // Handle pots and sliders (or, in calibration mode, track raw min/max)
   if (calMode) {
-    updateCalibrationMode();
+    if (calPage == CAL_PAGE_KEYTEST) updateKeyTestPage();
+    else updateCalibrationMode();
   } else {
     updatePotValues();
   }
@@ -763,8 +778,12 @@ void saveCalibrationToEeprom() {
 
 void enterCalMode() {
   calMode = true;
+  calPage = CAL_PAGE_KEYTEST;
   cheatProgress = 0;
   calSeqProgress = 0;
+  calSkipHoldStart = 0;
+  calPageFlashStart = 0;
+  for (int i = 0; i < NUMPIXELS; i++) keyTested[i] = false;
   for (int i = 0; i < NUM_SLIDERS; i++) {
     calMinSlider[i] = 4095;
     calMaxSlider[i] = 0;
@@ -774,7 +793,60 @@ void enterCalMode() {
     calMaxPot[i] = 0;
   }
   keypadPixels.clear();
+  Serial.println("Calibration mode: key test - press every pad (hold B to skip)");
+}
+
+// Leave the key test page for the analog page. Green flash = every pad
+// passed, amber = skipped with at least one pad untested.
+void enterCalAnalogPage(bool allPassed) {
+  calPage = CAL_PAGE_ANALOG;
+  calSkipHoldStart = 0;
+  calPageFlashColor = allPassed ? keypadPixels.Color(0x00, 0x80, 0x00)
+                                : keypadPixels.Color(0x80, 0x40, 0x00);
+  calPageFlashStart = millis();
+  if (allPassed) {
+    Serial.println("Key test passed: all pads OK");
+  } else {
+    Serial.print("Key test skipped, untested keyIndex:");
+    for (int i = 0; i < NUMPIXELS; i++) {
+      if (padToPixel[i] >= 0 && !keyTested[i]) {
+        Serial.print(" ");
+        Serial.print(i);
+      }
+    }
+    Serial.println();
+  }
   Serial.println("Calibration mode: sweep all sliders/pots full travel, then A=save B=cancel");
+}
+
+// Key test page: dim red = not pressed yet, green = pressed at least once,
+// white = currently held. Also handles the long-press-B skip.
+void updateKeyTestPage() {
+  if (calSkipHoldStart != 0 && millis() - calSkipHoldStart >= CAL_SKIP_HOLD_MS) {
+    enterCalAnalogPage(false);
+    return;
+  }
+
+  bool allTested = true;
+  for (int i = 0; i < NUMPIXELS; i++) {
+    int pixel = padToPixel[i];
+    if (pixel < 0) continue;
+    uint32_t color;
+    if (keyHeld[i]) color = keypadPixels.Color(0x40, 0x40, 0x40);
+    else if (keyTested[i]) color = keypadPixels.Color(0x00, 0x30, 0x00);
+    else color = keypadPixels.Color(0x08, 0x00, 0x00);
+    keypadPixels.setPixelColor(pixel, color);
+    if (!keyTested[i]) allTested = false;
+  }
+
+  // Wait for release so the last pad's press doesn't carry into page 2
+  if (allTested) {
+    bool anyHeld = false;
+    for (int i = 0; i < NUMPIXELS; i++) {
+      if (padToPixel[i] >= 0 && keyHeld[i]) anyHeld = true;
+    }
+    if (!anyHeld) enterCalAnalogPage(true);
+  }
 }
 
 void exitCalMode(bool save) {
@@ -841,6 +913,16 @@ void updateCalibrationMode() {
   static unsigned long lastCalUpdate = 0;
   if (millis() - lastCalUpdate < 5) return;
   lastCalUpdate = millis();
+
+  // Page-change flash from the key test page, then start from a blank pad
+  if (calPageFlashStart != 0) {
+    if (millis() - calPageFlashStart < CAL_PAGE_FLASH_MS) {
+      keypadPixels.fill(calPageFlashColor);
+      return;
+    }
+    calPageFlashStart = 0;
+    keypadPixels.clear();
+  }
 
   for (int ch = 0; ch < NUM_SLIDERS; ch++) {
     mux.channel(ch);
@@ -942,8 +1024,14 @@ void handleKeypad() {
       if (pressed) {
         keyHeld[keyIndex] = true;
         if (calMode) {
-          // Calibration mode swallows key presses: A saves, B cancels
+          // Calibration mode swallows key presses. Key test page: record the
+          // press (holding B skips ahead). Analog page: A saves, B cancels.
           int pixel = padToPixel[keyIndex];
+          if (calPage == CAL_PAGE_KEYTEST) {
+            keyTested[keyIndex] = true;
+            if (pixel == CAL_CANCEL_PIXEL) calSkipHoldStart = millis();
+            return;
+          }
           if (pixel == CAL_SAVE_PIXEL) exitCalMode(true);
           else if (pixel == CAL_CANCEL_PIXEL) exitCalMode(false);
           return;
@@ -966,6 +1054,7 @@ void handleKeypad() {
         Serial.println(" ON");
       } else {
         keyHeld[keyIndex] = false;
+        if (calMode && padToPixel[keyIndex] == CAL_CANCEL_PIXEL) calSkipHoldStart = 0;
         if (usbDeviceReady()) {
           MIDI.sendNoteOff(midiNote, 0, MIDI_OUT_CH);
         }

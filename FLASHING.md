@@ -38,11 +38,17 @@ No computer needed:
    bottom-left — and again. Releasing the bottom row mid-gesture cancels it.
    (This two-handed hold is a safety interlock so calibration can't be
    entered by accident.)
-2. The keypad switches to calibration display: pixels 0–11 = sliders,
+2. **Key test:** every pad lights dim red. Press each pad once — it turns
+   green (white while held). A pad that stays red has a bad switch; one
+   that never lights at all has a bad LED; one that stays white is stuck.
+   When all pads are green the keypad flashes green and moves on by itself.
+   If a pad is dead, **hold B** (top-right grid corner) for 1.5 s to skip
+   ahead (amber flash).
+3. The keypad switches to the slider/pot display: pixels 0–11 = sliders,
    row 3 = pots. Red = not calibrated yet.
-3. Sweep **every slider and pot through its full travel** (end to end).
+4. Sweep **every slider and pot through its full travel** (end to end).
    Each channel's LED turns green once it has seen enough range.
-4. Press the grid's bottom-right corner (**A**, lit green) to save, or
+5. Press the grid's bottom-right corner (**A**, lit green) to save, or
    top-right (**B**, lit white) to cancel.
 
 Only channels that were fully swept get updated, so you can recalibrate a
