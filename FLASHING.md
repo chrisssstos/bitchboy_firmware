@@ -55,6 +55,30 @@ Only channels that were fully swept get updated, so you can recalibrate a
 single slider without touching the rest. Values are stored in the last
 flash sector and survive reflashes via the web flasher.
 
+## Windows 11: LEDs / MIDI feedback not working
+
+Windows 11's MIDI 2.0 update (Windows MIDI Services) leaves USB MIDI 1.0
+devices on the old "USB Audio Device" driver. On that driver MIDI *from* the
+BitchBoy works but MIDI *to* it doesn't, so LEDs don't light up from
+Resolume/Ableton ([Resolume's article](https://resolume.com/support/en/midi-troubles-on-windows-with-midi-2-0-update)).
+The fix is to switch the device to the new "USBMidi2-ACX" driver:
+
+1. Close Resolume, Ableton and other MIDI software, and plug in the BitchBoy.
+2. Download [`windows/BitchBoy-Windows-MIDI-Fix.bat`](windows/BitchBoy-Windows-MIDI-Fix.bat)
+   and double-click it. Allow the administrator prompt.
+3. When it says *Done*, unplug and replug the BitchBoy.
+
+It only changes BitchBoys that are still on the old driver, and does nothing
+on PCs without the MIDI 2.0 update. Windows remembers the choice per unit, so
+it's needed once per BitchBoy per PC; firmware updates keep it. To undo, run
+it from a command prompt as `BitchBoy-Windows-MIDI-Fix.bat undo`.
+
+If Windows warns about the file ("Windows protected your PC"), click
+*More info* → *Run anyway*; it's a plain text script you can open and read.
+Manual alternative: Device Manager → *Sound, video and game controllers* →
+right-click *BitchBoy* → *Update driver* → *Browse my computer* → *Let me pick*
+→ **USBMidi2-ACX**, then replug.
+
 ## For maintainers: building a release
 
 ```bash

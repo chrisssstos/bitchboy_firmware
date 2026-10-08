@@ -21,6 +21,14 @@ and settings are preserved. Full walkthrough (incl. on-device calibration) in
 > using it (Ableton or another DAW, MIDI tools, other browser tabs), replug,
 > and try again.
 
+## Windows 11: LEDs / MIDI feedback not working?
+
+Windows 11's MIDI 2.0 update keeps the BitchBoy on an old driver that can't
+send MIDI *to* it, so pads work but LEDs don't follow Resolume/Ableton. Download
+[`windows/BitchBoy-Windows-MIDI-Fix.bat`](windows/BitchBoy-Windows-MIDI-Fix.bat),
+plug in the BitchBoy and double-click the file. It switches only BitchBoys still
+on the old driver, once per unit per PC. Details in [FLASHING.md](FLASHING.md#windows-11-leds--midi-feedback-not-working).
+
 ## Want to modify the firmware? (developers)
 
 ```bash
@@ -57,6 +65,7 @@ so the binary the site fetches is never stale — no manual rebuild needed.
 | `firmware/patched_pio_usb/` | Required Pico-PIO-USB patch (bounded busy-loops) |
 | `ableton/BitchBoy/` | Ableton Live control-surface script |
 | `flasher/firmware/` | Built firmware binary the site flasher fetches |
+| `windows/` | One-click Windows 11 MIDI driver fix for users |
 | `tools/build_firmware.sh` | One-command reproducible build |
 | `experiments/` | Old/experimental sketches — not built, kept for reference |
 | `FLASHING.md` | End-user flashing + calibration guide |
