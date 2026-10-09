@@ -1,4 +1,4 @@
-<# : BitchBoy Windows MIDI fix. Batch launcher first, PowerShell body after the #> line.
+<# : BitchBoy Windows MIDI fix. Batch launcher first, PowerShell body after the comment-close line.
 @echo off
 setlocal
 set "BBFIX_SELF=%~f0"
