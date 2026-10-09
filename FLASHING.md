@@ -48,11 +48,19 @@ No computer needed:
    row 3 = pots. Red = not calibrated yet.
 4. Sweep **every slider and pot through its full travel** (end to end).
    Each channel's LED turns green once it has seen enough range.
-5. Press the grid's bottom-right corner (**A**, lit green) to save, or
+5. Press the grid's bottom-right corner (**A**, lit green) to continue, or
    top-right (**B**, lit white) to cancel.
+6. **Knob centres:** the keypad flashes blue. Turn every pot into its
+   **centre notch**. Each pot's LED turns green when it's near the middle.
+   Press **A** to save everything, or **B** to cancel. From then on the
+   notch always sends exactly CC 64, with a little slack so the detent's
+   wiggle doesn't move the value.
 
 Only channels that were fully swept get updated, so you can recalibrate a
-single slider without touching the rest. Values are stored in the last
+single slider without touching the rest. Likewise only pots that are green
+on the centre step get a new centre; a pot left at an end keeps its old one.
+To redo just the centres, skip the key test (hold **B**), press **A** on the
+sweep step without moving anything, then set the knobs to their notches. Values are stored in the last
 flash sector and survive reflashes via the web flasher.
 
 ## Windows 11: LEDs / MIDI feedback not working

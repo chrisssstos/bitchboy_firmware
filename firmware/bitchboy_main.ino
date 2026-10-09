@@ -15,16 +15,18 @@
 #define EEPROM_MAGIC      0xA5
 
 // Calibration block: lives alongside the settings above in the same EEPROM
-// sector. Layout: magic, version, then 40 little-endian uint16s
-// (12 slider mins, 12 slider maxes, 8 pot mins, 8 pot maxes), then an
-// XOR checksum of the 80 data bytes. The UF2 bootloader never erases this
-// sector, so calibration survives firmware updates.
+// sector. Layout: magic, version, then 48 little-endian uint16s
+// (12 slider mins, 12 slider maxes, 8 pot mins, 8 pot maxes, 8 pot centre
+// detents), then an XOR checksum of the 96 data bytes. Version 1 blocks
+// (no pot centres, checksum after 80 bytes) still load. The UF2 bootloader
+// never erases this sector, so calibration survives firmware updates.
 #define EEPROM_CAL_MAGIC_ADDR  2
 #define EEPROM_CAL_VER_ADDR    3
 #define EEPROM_CAL_DATA_ADDR   4
 #define EEPROM_CAL_MAGIC     0xC5
-#define EEPROM_CAL_VERSION   1
-#define CAL_NUM_VALUES (NUM_SLIDERS * 2 + NUM_POTS * 2)
+#define EEPROM_CAL_VERSION   2
+#define CAL_NUM_VALUES (NUM_SLIDERS * 2 + NUM_POTS * 3)
+#define CAL_V1_NUM_VALUES (NUM_SLIDERS * 2 + NUM_POTS * 2)
 #define EEPROM_CAL_CHECKSUM_ADDR (EEPROM_CAL_DATA_ADDR + CAL_NUM_VALUES * 2)
 #define CAL_CHECKSUM_SEED 0x5A
 
@@ -150,6 +152,11 @@ int sliderMaxValues[NUM_SLIDERS] = {4004, 3857, 4095, 4084, 3905, 3954, 4095, 39
 
 int potMinValues[NUM_POTS] = {355, 352, 377, 379, 369, 390, 383, 384};
 int potMaxValues[NUM_POTS] = {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
+// Raw reading at each pot's centre detent; 0 = not calibrated (plain linear).
+int potCenterValues[NUM_POTS] = {0, 0, 0, 0, 0, 0, 0, 0};
+// Raw counts either side of the detent that still output exactly CC 64,
+// absorbing the detent's mechanical play.
+#define POT_CENTER_SNAP 40
 
 int previousSliderValues[NUM_SLIDERS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 int previousPotValues[NUM_POTS] = {-1, -1, -1, -1, -1, -1, -1, -1};
@@ -293,7 +300,10 @@ const int CHEAT_GRID_KEYIDX[9] = {40, 41, 42, 48, 49, 50, 56, 57, 58};
 // pressed it advances on its own; holding B(42) skips ahead if a key is dead.
 // Page 2 (analog): the user sweeps every slider/pot through its full travel,
 // per-channel LEDs go green once a healthy span has been seen, then A(48)
-// saves to EEPROM and B(42) cancels.
+// moves on and B(42) cancels.
+// Page 3 (centre): the user parks every pot in its centre detent; pots that
+// are near mid-travel show green and get that reading stored as their CC 64
+// point. A(48) saves everything to EEPROM, B(42) cancels.
 // Defaults compiled into the firmware are only used when EEPROM holds no
 // valid calibration, so one universal .uf2 works on every unit.
 const int CAL_SEQ[] = {40, 42, 48, 46, 40, 42, 48, 46};
@@ -316,12 +326,13 @@ static bool calGuardHeld() {
 bool calMode = false;
 int calMinSlider[NUM_SLIDERS], calMaxSlider[NUM_SLIDERS];
 int calMinPot[NUM_POTS], calMaxPot[NUM_POTS];
+int calCenterPot[NUM_POTS];        // live raw reading on the centre page
 #define CAL_MIN_SPAN 1000          // raw span required to accept a channel
 #define CAL_SAVE_PIXEL 48          // 'A' corner of the 3x3 grid
 #define CAL_CANCEL_PIXEL 42        // 'B' corner of the 3x3 grid
 const int CAL_POT_PIXEL_BASE = 16; // pots shown on row 3 (pixels 16..23)
 
-enum CalPage { CAL_PAGE_KEYTEST, CAL_PAGE_ANALOG };
+enum CalPage { CAL_PAGE_KEYTEST, CAL_PAGE_ANALOG, CAL_PAGE_CENTER };
 CalPage calPage = CAL_PAGE_KEYTEST;
 bool keyTested[NUMPIXELS];                 // by keyIndex
 unsigned long calSkipHoldStart = 0;        // B press time on the key test page
@@ -736,13 +747,17 @@ static int eepromRead16(int addr) {
 // compiled-in defaults untouched) if the block is missing or corrupt.
 bool loadCalibrationFromEeprom() {
   if (EEPROM.read(EEPROM_CAL_MAGIC_ADDR) != EEPROM_CAL_MAGIC) return false;
-  if (EEPROM.read(EEPROM_CAL_VER_ADDR) != EEPROM_CAL_VERSION) return false;
+  uint8_t version = EEPROM.read(EEPROM_CAL_VER_ADDR);
+  int numValues;
+  if (version == 1) numValues = CAL_V1_NUM_VALUES;  // pre-centre-detent layout
+  else if (version == EEPROM_CAL_VERSION) numValues = CAL_NUM_VALUES;
+  else return false;
 
   uint8_t checksum = CAL_CHECKSUM_SEED;
-  for (int i = 0; i < CAL_NUM_VALUES * 2; i++) {
+  for (int i = 0; i < numValues * 2; i++) {
     checksum ^= EEPROM.read(EEPROM_CAL_DATA_ADDR + i);
   }
-  if (checksum != EEPROM.read(EEPROM_CAL_CHECKSUM_ADDR)) {
+  if (checksum != EEPROM.read(EEPROM_CAL_DATA_ADDR + numValues * 2)) {
     Serial.println("Calibration block checksum mismatch, using defaults");
     return false;
   }
@@ -752,6 +767,9 @@ bool loadCalibrationFromEeprom() {
   for (int i = 0; i < NUM_SLIDERS; i++, addr += 2) sliderMaxValues[i] = eepromRead16(addr);
   for (int i = 0; i < NUM_POTS; i++, addr += 2) potMinValues[i] = eepromRead16(addr);
   for (int i = 0; i < NUM_POTS; i++, addr += 2) potMaxValues[i] = eepromRead16(addr);
+  if (version >= 2) {
+    for (int i = 0; i < NUM_POTS; i++, addr += 2) potCenterValues[i] = eepromRead16(addr);
+  }
   return true;
 }
 
@@ -763,6 +781,7 @@ void saveCalibrationToEeprom() {
   for (int i = 0; i < NUM_SLIDERS; i++, addr += 2) eepromWrite16(addr, sliderMaxValues[i]);
   for (int i = 0; i < NUM_POTS; i++, addr += 2) eepromWrite16(addr, potMinValues[i]);
   for (int i = 0; i < NUM_POTS; i++, addr += 2) eepromWrite16(addr, potMaxValues[i]);
+  for (int i = 0; i < NUM_POTS; i++, addr += 2) eepromWrite16(addr, potCenterValues[i]);
 
   uint8_t checksum = CAL_CHECKSUM_SEED;
   for (int i = 0; i < CAL_NUM_VALUES * 2; i++) {
@@ -791,6 +810,7 @@ void enterCalMode() {
   for (int i = 0; i < NUM_POTS; i++) {
     calMinPot[i] = 4095;
     calMaxPot[i] = 0;
+    calCenterPot[i] = -1;
   }
   keypadPixels.clear();
   Serial.println("Calibration mode: key test - press every pad (hold B to skip)");
@@ -817,6 +837,36 @@ void enterCalAnalogPage(bool allPassed) {
     Serial.println();
   }
   Serial.println("Calibration mode: sweep all sliders/pots full travel, then A=save B=cancel");
+}
+
+// Leave the analog page for the centre-detent page (blue flash).
+void enterCalCenterPage() {
+  calPage = CAL_PAGE_CENTER;
+  calPageFlashColor = keypadPixels.Color(0x00, 0x20, 0x80);
+  calPageFlashStart = millis();
+  for (int i = 0; i < NUM_POTS; i++) calCenterPot[i] = -1;
+  Serial.println("Calibration mode: set all pots to their centre notch, then A=save B=cancel");
+}
+
+// The range a pot will have after saving: the freshly swept one if it was
+// accepted on the analog page, otherwise its current calibration.
+static void calPotRange(int ch, int &lo, int &hi) {
+  if (calMaxPot[ch] - calMinPot[ch] >= CAL_MIN_SPAN) {
+    lo = calMinPot[ch];
+    hi = calMaxPot[ch];
+  } else {
+    lo = potMinValues[ch];
+    hi = potMaxValues[ch];
+  }
+}
+
+// A centre reading is only taken if the pot sits in the middle 40% of its
+// travel, so a knob left at an end can't be stored as its centre.
+static bool calCenterValid(int ch) {
+  int lo, hi;
+  calPotRange(ch, lo, hi);
+  int raw = calCenterPot[ch];
+  return raw >= 0 && raw > lo + (hi - lo) * 3 / 10 && raw < hi - (hi - lo) * 3 / 10;
 }
 
 // Key test page: dim red = not pressed yet, green = pressed at least once,
@@ -864,9 +914,16 @@ void exitCalMode(bool save) {
       }
     }
     for (int i = 0; i < NUM_POTS; i++) {
+      // Checked before the range is applied; calPotRange already accounts
+      // for the newly swept range.
+      bool centerOk = calCenterValid(i);
       if (calMaxPot[i] - calMinPot[i] >= CAL_MIN_SPAN) {
         potMinValues[i] = calMinPot[i];
         potMaxValues[i] = calMaxPot[i];
+        accepted++;
+      }
+      if (centerOk) {
+        potCenterValues[i] = calCenterPot[i];
         accepted++;
       }
     }
@@ -924,6 +981,11 @@ void updateCalibrationMode() {
     keypadPixels.clear();
   }
 
+  if (calPage == CAL_PAGE_CENTER) {
+    updateCalCenterPage();
+    return;
+  }
+
   for (int ch = 0; ch < NUM_SLIDERS; ch++) {
     mux.channel(ch);
     delayMicroseconds(100);
@@ -948,6 +1010,29 @@ void updateCalibrationMode() {
   }
 
   // Hint keys: A = save (green), B = cancel (white)
+  keypadPixels.setPixelColor(CAL_SAVE_PIXEL, keypadPixels.Color(0x00, 0x80, 0x00));
+  keypadPixels.setPixelColor(CAL_CANCEL_PIXEL, keypadPixels.Color(0x40, 0x40, 0x40));
+}
+
+// Centre page: pots on pixels 16..23, green = near mid-travel and will be
+// stored as the CC 64 point on save, red = not near the middle (keeps its
+// previous centre). Readings are lightly smoothed so the stored value isn't
+// one noisy sample.
+void updateCalCenterPage() {
+  for (int ch = 0; ch < NUM_POTS; ch++) {
+    mux.channel(ch);
+    delayMicroseconds(100);
+    int raw = readBurstTrimmedMean(POTS_PIN);
+    if (calCenterPot[ch] < 0 || abs(raw - calCenterPot[ch]) > ADC_OUTLIER_THRESHOLD) {
+      calCenterPot[ch] = raw;  // first reading, or the knob was moved
+    } else {
+      calCenterPot[ch] = (calCenterPot[ch] * 3 + raw) / 4;
+    }
+    keypadPixels.setPixelColor(CAL_POT_PIXEL_BASE + ch,
+                               calCenterValid(ch) ? keypadPixels.Color(0x00, 0x30, 0x00)
+                                                  : keypadPixels.Color(0x30, 0x00, 0x00));
+  }
+
   keypadPixels.setPixelColor(CAL_SAVE_PIXEL, keypadPixels.Color(0x00, 0x80, 0x00));
   keypadPixels.setPixelColor(CAL_CANCEL_PIXEL, keypadPixels.Color(0x40, 0x40, 0x40));
 }
@@ -1025,15 +1110,20 @@ void handleKeypad() {
         keyHeld[keyIndex] = true;
         if (calMode) {
           // Calibration mode swallows key presses. Key test page: record the
-          // press (holding B skips ahead). Analog page: A saves, B cancels.
+          // press (holding B skips ahead). Analog page: A moves on to the
+          // centre page, B cancels. Centre page: A saves, B cancels.
           int pixel = padToPixel[keyIndex];
           if (calPage == CAL_PAGE_KEYTEST) {
             keyTested[keyIndex] = true;
             if (pixel == CAL_CANCEL_PIXEL) calSkipHoldStart = millis();
             return;
           }
-          if (pixel == CAL_SAVE_PIXEL) exitCalMode(true);
-          else if (pixel == CAL_CANCEL_PIXEL) exitCalMode(false);
+          if (pixel == CAL_SAVE_PIXEL) {
+            if (calPage == CAL_PAGE_ANALOG) enterCalCenterPage();
+            else exitCalMode(true);
+          } else if (pixel == CAL_CANCEL_PIXEL) {
+            exitCalMode(false);
+          }
           return;
         }
         processCheatCode(padToPixel[keyIndex]);
@@ -1158,6 +1248,19 @@ int readCalibratedSlider(int channel, int prevCC) {
   return constrain(cc, 0, 127);
 }
 
+// Raw pot reading -> 0..1270. With a calibrated centre detent each half is
+// mapped separately, so the notch lands on CC 64 whatever the pot's taper,
+// and anything within POT_CENTER_SNAP of it outputs exactly CC 64.
+static int potToInternal(int ch, int raw) {
+  int lo = potMinValues[ch], hi = potMaxValues[ch], c = potCenterValues[ch];
+  if (c - POT_CENTER_SNAP <= lo || c + POT_CENTER_SNAP >= hi) {
+    return map(raw, lo, hi, 0, 1270);
+  }
+  if (raw < c - POT_CENTER_SNAP) return map(raw, lo, c - POT_CENTER_SNAP, 0, 640);
+  if (raw > c + POT_CENTER_SNAP) return map(raw, c + POT_CENTER_SNAP, hi, 640, 1270);
+  return 640;
+}
+
 int readCalibratedPot(int channel, int prevCC) {
   mux.channel(channel);
   delayMicroseconds(100);
@@ -1176,7 +1279,7 @@ int readCalibratedPot(int channel, int prevCC) {
     }
   }
 
-  int internal = map((int)smoothedPotValues[channel], potMinValues[channel], potMaxValues[channel], 0, 1270);
+  int internal = potToInternal(channel, (int)smoothedPotValues[channel]);
   int cc = quantizeWithHysteresis(internal, prevCC);
 
   if (cc <= 2) cc = 0;
